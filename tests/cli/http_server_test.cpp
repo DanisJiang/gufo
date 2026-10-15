@@ -2237,8 +2237,12 @@ bool HasIpv6Loopback() {
 
 void TestListenAddresses() {
   using gufo::server::IsListenAddress;
-  for (const char* host : {"127.0.0.1", "0.0.0.0", "::", "::1", "fe80::1%lo"})
+  for (const char* host : {"127.0.0.1", "0.0.0.0", "::", "::1", "fe80::1%1"})
     assert(IsListenAddress(host));
+#ifndef _WIN32
+  // Interface names are platform-specific; both platforms accept an index.
+  assert(IsListenAddress("fe80::1%lo"));
+#endif
   for (const char* host : {"", "localhost", "127.1", "[::1]", "bad.address"})
     assert(!IsListenAddress(host));
   if (!HasIpv6Loopback()) {
