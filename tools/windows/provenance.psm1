@@ -2,6 +2,29 @@
 # Root LICENSE applies to this module; vendor files retain their own terms.
 Set-StrictMode -Version Latest
 
+function Get-GufoMicrosoftRuntimeSources {
+  $redist = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio", "$env:ProgramFiles\Microsoft Visual Studio" -Recurse -Directory `
+    -Filter 'Microsoft.VC14*.CRT' -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match '\\Redist\\MSVC\\[0-9.]+\\x64\\' -and $_.FullName -notmatch 'onecore' } |
+    Sort-Object FullName -Descending | Select-Object -First 1
+  if (-not $redist) { throw 'Visual C++ redistributable files not found' }
+  $sources = @{}
+  Get-ChildItem (Join-Path $redist.FullName '*.dll') | Where-Object { $_.Name -match '^(msvcp140|vcruntime140)' } | ForEach-Object {
+    $sources[$_.Name] = $_.FullName
+  }
+  $omp = Get-ChildItem (Join-Path (Split-Path $redist.FullName) 'Microsoft.VC14*.OpenMP.LLVM\libomp140.x86_64.dll') -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $omp) { $omp = Get-Item "$env:SystemRoot\System32\libomp140.x86_64.dll" -ErrorAction SilentlyContinue }
+  if (-not $omp) { throw 'Microsoft-distributed libomp140.x86_64.dll not found' }
+  $sources[$omp.Name] = $omp.FullName
+  foreach ($entry in $sources.GetEnumerator()) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $entry.Value
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
+      throw "Microsoft runtime lacks a valid Microsoft signature: $($entry.Key)"
+    }
+  }
+  $sources
+}
+
 function Get-GufoRelativePath([string]$Root, [string]$Path) {
   $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
   $full = [IO.Path]::GetFullPath($Path)
@@ -108,4 +131,4 @@ function Get-GufoPackageProvenance {
   }
 }
 
-Export-ModuleMember -Function Get-GufoPackageProvenance
+Export-ModuleMember -Function Get-GufoPackageProvenance, Get-GufoMicrosoftRuntimeSources

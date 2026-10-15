@@ -64,3 +64,7 @@ try {
 } finally {
   if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
 }
+if ($env:OS -eq 'Windows_NT') {
+  $native = Get-GufoMicrosoftRuntimeSources
+  Write-Host ("PASS: native Microsoft runtime signatures valid: " + (($native.Keys | Sort-Object) -join ', '))
+}

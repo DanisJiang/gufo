@@ -34,21 +34,10 @@ foreach ($dir in "rocblas", "hipblaslt") {
 
 # Visual C++ runtime (app-local deployment of the redistributable files) and
 # the LLVM OpenMP runtime the ROCm BLAS libraries import.
-$redist = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio", "$env:ProgramFiles\Microsoft Visual Studio" -Recurse -Directory `
-  -Filter "Microsoft.VC14*.CRT" -ErrorAction SilentlyContinue |
-  Where-Object { $_.FullName -match "\\Redist\\MSVC\\[0-9.]+\\x64\\" -and $_.FullName -notmatch "onecore" } |
-  Sort-Object FullName -Descending | Select-Object -First 1
-if (-not $redist) { throw "Visual C++ redistributable files not found (Visual Studio Build Tools)" }
-$microsoftSources = @{}
-Get-ChildItem (Join-Path $redist.FullName "*.dll") | Where-Object { $_.Name -match "^(msvcp140|vcruntime140)" } | ForEach-Object {
-  Copy-Item -LiteralPath $_.FullName -Destination $bin
-  $microsoftSources[$_.Name] = $_.FullName
+$microsoftSources = Get-GufoMicrosoftRuntimeSources
+foreach ($entry in $microsoftSources.GetEnumerator()) {
+  Copy-Item -LiteralPath $entry.Value -Destination $bin
 }
-$omp = Get-ChildItem (Join-Path (Split-Path $redist.FullName) "Microsoft.VC14*.OpenMP.LLVM\libomp140.x86_64.dll") -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $omp) { $omp = Get-Item "$env:SystemRoot\System32\libomp140.x86_64.dll" -ErrorAction SilentlyContinue }
-if (-not $omp) { throw "libomp140.x86_64.dll not found (install the Visual C++ redistributable)" }
-Copy-Item $omp.FullName $bin
-$microsoftSources[$omp.Name] = $omp.FullName
 
 Copy-Item (Join-Path $root "start.cmd") $stage
 Copy-Item (Join-Path $root "tools\windows\launcher.ps1"), (Join-Path $root "tools\windows\inventory.ps1") (Join-Path $stage "tools\windows")
