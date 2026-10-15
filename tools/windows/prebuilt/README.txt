@@ -5,6 +5,18 @@ A native Windows build of gufo (https://github.com/gufo-org/gufo), the ROCm
 inference engine for AMD Strix Halo, with an OpenAI-compatible server.
 Source and revision: see the build information at the end of this file.
 
+VERIFYING THE PACKAGE
+  PROVENANCE.json records the source or official vendor input and SHA-256
+  for every runtime file. SHA256SUMS.txt lists the per-file runtime hashes.
+  The download also includes a zip checksum and a Defender scan report.
+  A report marked not_available means no antivirus scan was performed.
+  With the GitHub CLI, verify the signed build provenance of the zip:
+    gh attestation verify PACKAGE.zip -R DanisJiang/gufo-windows
+  These are origin/integrity checks, not a guarantee of malware absence.
+  The Windows HIP and Microsoft runtimes include proprietary components;
+  see THIRD-PARTY.txt. The model repositories listed below are community
+  distributions, not Qwen's official binary releases.
+
 NEEDS
   - AMD Ryzen AI Max / Max+ (Strix Halo, Radeon 8060S / 8050S = gfx1151).
     No other GPU is supported.

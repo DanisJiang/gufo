@@ -4,7 +4,12 @@ ROCm for Windows (TheRock build, https://github.com/ROCm/TheRock)
   amdhip64_7.dll, hiprtc*.dll, amd_comgr*.dll, hipblas.dll, libhipblaslt.dll,
   rocblas.dll, rocsolver.dll, rocsparse.dll, origami.dll, rocm_kpack.dll,
   rocm-openblas*.dll, rocblas\library, hipblaslt\library
-  - MIT / NCSA / Apache-2.0 with LLVM exception (see the ROCm repositories)
+  - Component-specific MIT / NCSA / Apache-2.0 with LLVM exception licenses
+    apply to the open-source portions. This is not a wholly open-source
+    Windows runtime: amdhip64_7.dll includes PAL/Windows interop components
+    distributed under AMD's proprietary binary terms.
+    https://github.com/ROCm/TheRock/blob/main/docs/development/windows_support.md#building-clr-from-partial-sources
+    https://github.com/ROCm/amdgpu-windows-interop/blob/main/LICENSE
 vcpkg libraries
   OpenSSL (libcrypto, libssl, legacy) - Apache-2.0
   curl (libcurl) - curl license
@@ -13,8 +18,17 @@ vcpkg libraries
   libjpeg-turbo (jpeg62) - IJG / BSD-3-Clause
   libwebp and libsharpyuv - BSD-3-Clause
   zlib, and any other vcpkg runtime DLL present - their own permissive licenses
-Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll) and the LLVM
-OpenMP runtime (libomp140.x86_64.dll)
-  - Microsoft Visual Studio redistributable files, app-local deployment
+Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll)
+  - Microsoft-distributed binaries under the Visual Studio runtime terms.
+    VCRuntime is proprietary; the STL implementation has separately available
+    Apache-2.0 with LLVM exception source at https://github.com/microsoft/STL.
+LLVM OpenMP runtime (libomp140.x86_64.dll)
+  - The LLVM OpenMP implementation is open source. This package uses the
+    Microsoft-distributed runtime binary, under its applicable distribution
+    terms; it is not built by Gufo.
+
+PROVENANCE.json records the public source commit or official input for every
+file in bin/, with SHA-256 hashes and PE signature information. This records
+origin and integrity, not a guarantee of absence of malware or vulnerabilities.
 
 gufo itself: MIT (LICENSE).

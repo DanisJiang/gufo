@@ -15,6 +15,35 @@ runtimes in `bin\`, and `start.cmd`. It needs only a Strix Halo (gfx1151)
 machine, a current AMD driver and the models; its `README.txt` lists the
 downloads. `tools\windows\package.ps1` makes the zip from a release build.
 
+## Binary origins and verification
+
+Packages accept runtime files only from the public Gufo build, AMD's pinned
+official TheRock distribution, the reviewed ports at the pinned
+`microsoft/vcpkg` commit, or Microsoft runtime files with valid Microsoft
+Authenticode signatures. Each file in `bin/`, including GPU kernel data,
+must match its declared input byte-for-byte; an unknown or altered file
+stops packaging. Public-source builds are custom builds, not upstream
+vendor release binaries.
+
+`PROVENANCE.json` records source commits, vendor inputs, per-file SHA-256
+digests and PE signature results. `SHA256SUMS.txt` lists runtime hashes.
+The zip, provenance and Defender report receive GitHub build attestations;
+verify a downloaded zip with `gh attestation verify PACKAGE.zip -R
+DanisJiang/gufo-windows`. Sidecar checksum and JSON reports are uploaded
+beside the zip. Defender scans run when the hosted runner provides an
+enabled scanner; the report explicitly says `not_available` when no scan
+was possible. A detection or scanner error prevents publication.
+
+These checks establish origin and detect mismatched inputs. They do not
+prove that all source or vendor binaries are free of malicious code or
+vulnerabilities. Windows HIP includes proprietary PAL/interop components;
+Microsoft VCRuntime is proprietary too. See the
+[package notices](../tools/windows/prebuilt/THIRD-PARTY.txt).
+
+The `unsloth` and `z-lab` model downloads below are community artifacts,
+not Qwen's official binary releases. They are external to the installation
+package and need their own license, revision and integrity review.
+
 ## Prerequisites
 
 | Piece | Default location | Notes |
@@ -23,6 +52,7 @@ downloads. `tools\windows\package.ps1` makes the zip from a release build.
 | vcpkg | `C:\vcpkg` | `vcpkg install icu curl openssl libpng libjpeg-turbo libwebp --triplet x64-windows` |
 | Visual Studio Build Tools | any | "Desktop development with C++": MSVC STL + Windows SDK only; tested with VS 18 (MSVC 14.51) |
 | CMake 3.21+ and Ninja | `PATH`, or Ninja at `C:\tools\ninja` | |
+| Git | `PATH` | Packaging requires a clean checkout and records the full source and vcpkg commits |
 | Dedicated GPU memory | AMD Software > Performance > Tuning > Variable Graphics Memory | 96 GB for Qwen3.8-Flash-Next at 256K context; see [Memory](#memory) |
 
 The port is validated on TheRock 10.0.0. Other releases usually build, but a

@@ -24,6 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Test binary provenance policy
+        shell: pwsh
+        run: .\tools\windows\test-provenance.ps1
+
       - name: Checkout pinned vcpkg
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,7 +108,7 @@ jobs:
           & .\tools\windows\build.ps1 -Preset release -Rocm $env:GUFO_ROCM -Vcpkg (Join-Path $env:GITHUB_WORKSPACE 'vcpkg') -Jobs 2 -KeepGoing
           if ($LASTEXITCODE -ne 0) { throw 'Production build failed' }
           $version = (Get-Content version.txt -TotalCount 1).Trim()
-          & .\tools\windows\package.ps1 -Version "$version-$($env:GITHUB_SHA.Substring(0, 7))" -Vcpkg (Join-Path $env:GITHUB_WORKSPACE 'vcpkg')
+          & .\tools\windows\package.ps1 -Version "$version-$($env:GITHUB_SHA.Substring(0, 7))" -Vcpkg (Join-Path $env:GITHUB_WORKSPACE 'vcpkg') -Rocm $env:GUFO_ROCM
           if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
 
       - name: Smoke-test packaged CLI
@@ -126,12 +130,34 @@ jobs:
             } finally { Pop-Location }
           } finally { $env:PATH = $originalPath }
 
+      - name: Scan package with Microsoft Defender when available
+        shell: pwsh
+        run: |
+          $stage = @(Get-ChildItem dist -Directory -Filter 'gufo-windows-*')
+          if ($stage.Count -ne 1) { throw 'Expected one staged package' }
+          & .\tools\windows\scan-package.ps1 -Path $stage[0].FullName -Report "dist/$($stage[0].Name).defender.json"
+
       - name: Upload Windows package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gufo-windows-${{ github.sha }}
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/*.provenance.json
+            dist/*.defender.json
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload provenance and scan evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-provenance-${{ github.sha }}
+          path: |
+            dist/*.provenance.json
+            dist/*.defender.json
+          if-no-files-found: ignore
           retention-days: 14
 
       - name: Save compiler cache
@@ -149,3 +175,26 @@ jobs:
           path: build/cpu-test/Testing/Temporary/*.log
           if-no-files-found: ignore
           retention-days: 14
+
+  attest:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download this run's verified package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: gufo-windows-${{ github.sha }}
+          path: verified-package
+
+      - name: Attest package build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            verified-package/*.zip
+            verified-package/*.provenance.json
+            verified-package/*.defender.json

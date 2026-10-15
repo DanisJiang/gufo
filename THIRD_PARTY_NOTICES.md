@@ -8,6 +8,13 @@ Transitive system/toolchain dependencies retain their upstream licenses.
 its package expressions record source revisions, patches and build options.
 Non-Nix builds must retain the notices of the versions they actually distribute.
 
+Windows packages use AMD's official TheRock distribution and Microsoft runtime
+files in addition to public source builds. The Windows HIP runtime includes
+proprietary PAL/interop components; the Linux-oriented license table below is
+not a claim that the Windows bundle is entirely open source. See the
+[Windows package notices](tools/windows/prebuilt/THIRD-PARTY.txt) and the
+package's generated `PROVENANCE.json` for its binary origins and terms.
+
 ## Runtime and compiled code
 
 | Component Name | Relationship | License (SPDX) | Pinned Revision / Version | Upstream Source / Location |
