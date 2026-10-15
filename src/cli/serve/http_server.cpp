@@ -1549,6 +1549,12 @@ bool ParseListenAddress(const std::string& host, int port,
     *length = sizeof(sockaddr_in);
     return true;
   }
+  // getaddrinfo accepts different formats on Winsock and glibc. Validate the
+  // IPv6 literal separately, then let the OS resolve its optional scope.
+  in6_addr ipv6{};
+  const auto literal = host.substr(0, host.find('%'));
+  if (::inet_pton(AF_INET6, literal.c_str(), &ipv6) != 1)
+    return false;
   addrinfo hints{};
   hints.ai_family = AF_INET6;
   hints.ai_socktype = SOCK_STREAM;

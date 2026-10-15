@@ -2243,8 +2243,12 @@ void TestListenAddresses() {
   // Interface names are platform-specific; both platforms accept an index.
   assert(IsListenAddress("fe80::1%lo"));
 #endif
-  for (const char* host : {"", "localhost", "127.1", "[::1]", "bad.address"})
-    assert(!IsListenAddress(host));
+  for (const char* host : {"", "localhost", "127.1", "[::1]", "bad.address"}) {
+    const bool valid = IsListenAddress(host);
+    if (valid)
+      std::cerr << "Unexpected accepted listen address: '" << host << "'\n";
+    assert(!valid);
+  }
   if (!HasIpv6Loopback()) {
     std::cout << "IPv6 loopback unavailable; skipping IPv6 listener checks.\n";
     return;

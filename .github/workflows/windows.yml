@@ -45,12 +45,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'TheRock extraction failed' }
           Remove-Item $archive
 
+      - name: Identify dependency toolchain image
+        id: runner-image
+        shell: pwsh
+        run: |
+          $version = if ($env:ImageVersion) { $env:ImageVersion } else { $env:GITHUB_SHA }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Restore compiled dependencies
         id: dependencies
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-windows-2025-x64-20ceb8adbf0504d4b0d5e4058a32f9d4fc896391
+          key: vcpkg-windows-2025-x64-20ceb8adbf0504d4b0d5e4058a32f9d4fc896391-${{ steps.runner-image.outputs.version }}
+          restore-keys: vcpkg-windows-2025-x64-20ceb8adbf0504d4b0d5e4058a32f9d4fc896391
 
       - name: Install CPU dependencies
         shell: pwsh

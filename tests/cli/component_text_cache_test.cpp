@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <numeric>
 #include <thread>
 
@@ -976,6 +977,7 @@ int main() {
   ReuseAndBranches();
   EditBoundariesSurviveActualBackingPressure();
   ReusedConversationOutlivesOneUseRequests();
+  std::cout << "Running disk cache contracts\n" << std::flush;
   RestartAndCorruption();
   FailedCaptureKeepsPublishedBoundary();
   DiskBudgetEvictsAnUnpinnedConversation();
@@ -985,6 +987,9 @@ int main() {
   StagingCountsAgainstRamCeiling();
   DiskDirectoryHasOneOwner();
   GridDoesNotSuppressFirstDiskPrompt();
+  std::cout << "Running near-tail disk branch restart\n" << std::flush;
   NearTailDiskBranchSurvivesRestart();
+  std::cout << "Running deep disk restart\n" << std::flush;
   UnbackedDeepRowsSurviveDiskRestart();
+  std::cout << "Component text cache checks passed\n";
 }

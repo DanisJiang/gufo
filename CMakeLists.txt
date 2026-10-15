@@ -581,6 +581,10 @@ if (BUILD_TESTING)
   target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake gufo_core gufo_logging)
   add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
   set_tests_properties(component_text_cache_test PROPERTIES LABELS "cpu;server;cache;state;lifecycle")
+  if (WIN32)
+    # Write-through disk publication is slower on hosted Windows storage.
+    set_tests_properties(component_text_cache_test PROPERTIES TIMEOUT 120)
+  endif()
 
   add_executable(text_model_runner_test
     tests/cli/text_model_runner_test.cpp
