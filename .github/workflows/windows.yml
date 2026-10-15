@@ -20,6 +20,7 @@ jobs:
       GUFO_ROCM: C:\TheRock\build
       VCPKG_DEFAULT_TRIPLET: x64-windows
       VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}\vcpkg-binary-cache
+      CCACHE_DIR: ${{ runner.temp }}\gufo-ccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -67,6 +68,13 @@ jobs:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
           key: ${{ steps.dependencies.outputs.cache-primary-key }}
 
+      - name: Restore compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: gufo-windows-2025-therock10-v1-${{ github.sha }}
+          restore-keys: gufo-windows-2025-therock10-v1-
+
       - name: Build CPU contracts
         shell: pwsh
         run: |
@@ -98,6 +106,13 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 14
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: gufo-windows-2025-therock10-v1-${{ github.sha }}
 
       - name: Upload test evidence
         if: always()

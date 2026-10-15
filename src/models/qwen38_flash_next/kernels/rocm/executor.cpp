@@ -3069,7 +3069,9 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   // before another request reuses those buffers; successful forwards already
   // synchronize below and need no additional wait.
   struct PinnedInputGuard {
-    hipStream_t stream;
+    // Completed decode waits may switch streams before a later stage fails.
+    // Drain the active stream before another request reuses pinned inputs.
+    const hipStream_t& stream;
     bool completed{false};
     ~PinnedInputGuard() {
       if (!completed)

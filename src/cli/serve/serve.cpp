@@ -136,7 +136,11 @@ void InstallFatalSignalReporter() {
   action.sa_handler = ReportFatalSignal;
   (void)::sigemptyset(&action.sa_mask);
   action.sa_flags = SA_RESETHAND;
-  for (const int number : {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE}) {
+  for (const int number : {SIGABRT, SIGSEGV,
+#ifdef SIGBUS
+                           SIGBUS,
+#endif
+                           SIGILL, SIGFPE}) {
     (void)::sigaction(number, &action, nullptr);
   }
 }
