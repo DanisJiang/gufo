@@ -3,7 +3,7 @@ Gufo for Windows - prebuilt
 
 A native Windows build of gufo (https://github.com/gufo-org/gufo), the ROCm
 inference engine for AMD Strix Halo, with an OpenAI-compatible server.
-Source and docs: https://github.com/pixmaate/gufo
+Source and revision: see the build information at the end of this file.
 
 NEEDS
   - AMD Ryzen AI Max / Max+ (Strix Halo, Radeon 8060S / 8050S = gfx1151).

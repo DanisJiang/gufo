@@ -108,6 +108,14 @@ WebSocket::~WebSocket() {
 }
 
 bool WebSocket::Read(char* data, std::size_t size) {
+  auto last_receive = std::chrono::steady_clock::now();
+  const auto idle = [&] {
+    const auto now = std::chrono::steady_clock::now();
+    const std::chrono::steady_clock::duration since_send(
+        now.time_since_epoch().count() - last_send_.load());
+    return idle_ > std::chrono::steady_clock::duration::zero() &&
+           now - last_receive >= idle_ && since_send >= idle_;
+  };
   while (size != 0 && !closed_.load()) {
     if (offset_ < buffered_.size()) {
       const auto count = std::min(size, buffered_.size() - offset_);
@@ -115,22 +123,25 @@ bool WebSocket::Read(char* data, std::size_t size) {
       offset_ += count;
       data += count;
       size -= count;
+      last_receive = std::chrono::steady_clock::now();
       continue;
     }
 #ifdef _WIN32
     // See platform::StopSocketReads: wake periodically to observe closed_.
-    if (!platform::WaitReadable(fd_, std::chrono::milliseconds(50)))
+    if (!platform::WaitReadable(fd_, std::chrono::milliseconds(50))) {
+      if (idle()) {
+        Close(1001);
+        return false;
+      }
       continue;
+    }
 #endif
     const auto count = platform::SocketRecv(fd_, data, size, 0);
     if (count < 0 && errno == EINTR)
       continue;
     if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       // A client that only listens to streamed output is not idle.
-      const std::chrono::steady_clock::duration since_send(
-          std::chrono::steady_clock::now().time_since_epoch().count() -
-          last_send_.load());
-      if (since_send < idle_)
+      if (!idle())
         continue;
       Close(1001);
       return false;
@@ -139,6 +150,7 @@ bool WebSocket::Read(char* data, std::size_t size) {
       return false;
     data += count;
     size -= static_cast<std::size_t>(count);
+    last_receive = std::chrono::steady_clock::now();
   }
   return size == 0;
 }

@@ -19,6 +19,7 @@ jobs:
     env:
       GUFO_ROCM: C:\TheRock\build
       VCPKG_DEFAULT_TRIPLET: x64-windows
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}\vcpkg-binary-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -43,13 +44,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'TheRock extraction failed' }
           Remove-Item $archive
 
+      - name: Restore compiled dependencies
+        id: dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-windows-2025-x64-20ceb8adbf0504d4b0d5e4058a32f9d4fc896391
+
       - name: Install CPU dependencies
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
           & .\vcpkg\vcpkg.exe install icu curl openssl libpng libjpeg-turbo libwebp --triplet x64-windows
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
+
+      - name: Cache compiled dependencies
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
 
       - name: Build CPU contracts
         shell: pwsh
