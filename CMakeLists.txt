@@ -31,7 +31,7 @@ if (WIN32)
   add_library(gufo_posix_compat STATIC
     compat/win32/posix.cpp
     compat/win32/spawn.cpp)
-  target_link_libraries(gufo_posix_compat PUBLIC ws2_32 psapi)
+  target_link_libraries(gufo_posix_compat PUBLIC ws2_32 psapi advapi32 pathcch)
   link_libraries(gufo_posix_compat)
 endif()
 

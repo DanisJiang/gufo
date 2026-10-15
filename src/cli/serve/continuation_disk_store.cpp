@@ -690,6 +690,27 @@ struct ContinuationDiskStore::Impl {
       throw std::runtime_error(
           ErrnoMessage("failed to open continuation disk directory"));
     }
+#ifdef _WIN32
+    // LockFileEx cannot lock a directory handle. All Windows instances use
+    // the same sidecar file for the publisher/orphan-cleanup exclusion.
+    directory_lock = ScopedFileDescriptor(
+        ::openat(directory_fd, ".gufo-legacy-lock",
+                 O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR));
+    if (!directory_lock) {
+      const auto message =
+          ErrnoMessage("failed to open continuation disk lock");
+      ::close(std::exchange(directory_fd, -1));
+      throw std::runtime_error(message);
+    }
+#endif
+  }
+
+  [[nodiscard]] int LockDescriptor() const noexcept {
+#ifdef _WIN32
+    return directory_lock.get();
+#else
+    return directory_fd;
+#endif
   }
 
   void Emit(ContinuationDiskEventAction action,
@@ -845,7 +866,7 @@ struct ContinuationDiskStore::Impl {
         // Publishers hold a shared directory lock from before temporary-file
         // creation through rename. Defer orphan cleanup while any is active;
         // readers must not wait for another store's potentially long write.
-        const ScopedFileLock cleanup_lock(directory_fd, LOCK_EX | LOCK_NB);
+        const ScopedFileLock cleanup_lock(LockDescriptor(), LOCK_EX | LOCK_NB);
         if (cleanup_lock)
           RemoveFileOnly(filename);
         continue;
@@ -1057,8 +1078,8 @@ struct ContinuationDiskStore::Impl {
                                   std::size_t payload_bytes) {
     // Save serializes publishers in this instance with write_mutex, and
     // startup indexing completes before its worker starts. Thus no two lock
-    // owners in this instance can share directory_fd's open file description.
-    const ScopedFileLock publication_lock(directory_fd, LOCK_SH);
+    // owners in this instance can share the lock's open file description.
+    const ScopedFileLock publication_lock(LockDescriptor(), LOCK_SH);
     if (!publication_lock)
       return false;
     const std::string temporary_filename =
@@ -1466,6 +1487,9 @@ struct ContinuationDiskStore::Impl {
   EventSink event_sink;
   KeyHashFunction key_hash;
   int directory_fd{-1};
+#ifdef _WIN32
+  ScopedFileDescriptor directory_lock;
+#endif
   mutable std::binary_semaphore operation_gate{1};
   std::mutex write_mutex;
   std::list<Entry> entries;

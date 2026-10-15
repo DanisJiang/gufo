@@ -6,6 +6,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include <aclapi.h>
+#include <windows.h>
+
+#include "gufo_win32_unmacro.h"
+#endif
+
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -593,8 +600,34 @@ void TestContentTrace() {
   }
   Trace::Close();
 
+#ifdef _WIN32
+  // std::filesystem reports the DOS read-only bit, not NTFS permissions.
+  // Inspect the actual ACL to retain the owner-only trace-file contract.
+  auto native_path = path.native();
+  PSID owner = nullptr;
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  assert(GetNamedSecurityInfoW(
+             native_path.data(), SE_FILE_OBJECT,
+             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner,
+             nullptr, &dacl, nullptr, &descriptor) == ERROR_SUCCESS);
+  assert(owner && dacl && dacl->AceCount == 1);
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  assert(GetSecurityDescriptorControl(descriptor, &control, &revision));
+  assert(control & SE_DACL_PROTECTED);
+  void* ace = nullptr;
+  assert(GetAce(dacl, 0, &ace));
+  const auto* allowed = static_cast<ACCESS_ALLOWED_ACE*>(ace);
+  assert(allowed->Header.AceType == ACCESS_ALLOWED_ACE_TYPE);
+  assert(EqualSid(owner, const_cast<DWORD*>(&allowed->SidStart)));
+  const DWORD required = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+  assert((allowed->Mask & required) == required);
+  LocalFree(descriptor);
+#else
   assert((fs::status(path).permissions() & fs::perms::all) ==
          (fs::perms::owner_read | fs::perms::owner_write));
+#endif
   std::vector<gufo::json::Value> records;
   {
     std::ifstream input(path);

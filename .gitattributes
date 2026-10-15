@@ -1,0 +1,2 @@
+# The pinned teacher template is identified by its exact SHA-256 bytes.
+src/models/qwen/reference/chat_template.jinja text eol=lf

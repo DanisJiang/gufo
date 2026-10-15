@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "tests/cache/fake_adapter.hpp"
+#include "tests/cache/temp_directory.hpp"
 
 using namespace gufo::cache;
 using namespace gufo::cache::testing;
@@ -19,10 +20,7 @@ namespace fs = std::filesystem;
 namespace {
 struct Directory {
   fs::path path;
-  Directory() {
-    char pattern[] = "/tmp/gufo-streaming-test-XXXXXX";
-    path = mkdtemp(pattern);
-  }
+  Directory() : path(MakeTemporaryDirectory("gufo-streaming-test-XXXXXX")) {}
   ~Directory() { fs::remove_all(path); }
 };
 struct Guard final : MutationGuard {

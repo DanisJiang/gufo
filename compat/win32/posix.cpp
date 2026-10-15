@@ -29,6 +29,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <pathcch.h>
 #include <psapi.h>
 #include <winternl.h>
 
@@ -51,6 +52,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <exception>
 #include <mutex>
@@ -399,6 +402,65 @@ bool IsDirectoryHandle(HANDLE handle) {
          (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
+// A POSIX owner-only creation mode must not inherit readable ACEs from an
+// arbitrary parent directory. The descriptor and SID storage live until the
+// synchronous CreateFile/CreateDirectory call has copied them.
+struct PrivateSecurity {
+  alignas(TOKEN_USER)
+      std::array<BYTE, sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE> user{};
+  alignas(ACL) std::array<BYTE, sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) +
+                                    SECURITY_MAX_SID_SIZE> acl{};
+  SECURITY_DESCRIPTOR descriptor{};
+
+  bool Init(mode_t mode, bool directory = false) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+      return false;
+    DWORD needed = 0;
+    const BOOL ok =
+        GetTokenInformation(token, TokenUser, user.data(),
+                            static_cast<DWORD>(user.size()), &needed);
+    const DWORD error = GetLastError();
+    CloseHandle(token);
+    if (!ok) {
+      SetLastError(error);
+      return false;
+    }
+    const auto sid = reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid;
+    DWORD access =
+        READ_CONTROL | WRITE_DAC | 0x00010000L /* DELETE */ | SYNCHRONIZE;
+    if (mode & S_IRUSR)
+      access |= FILE_GENERIC_READ;
+    if (mode & S_IWUSR)
+      access |= FILE_GENERIC_WRITE;
+    if (mode & S_IXUSR)
+      access |= FILE_GENERIC_EXECUTE;
+    auto* dacl = reinterpret_cast<ACL*>(acl.data());
+    return InitializeAcl(dacl, static_cast<DWORD>(acl.size()), ACL_REVISION) &&
+           AddAccessAllowedAceEx(
+               dacl, ACL_REVISION,
+               directory ? OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE : 0,
+               access, sid) &&
+           InitializeSecurityDescriptor(&descriptor,
+                                        SECURITY_DESCRIPTOR_REVISION) &&
+           SetSecurityDescriptorOwner(&descriptor, sid, FALSE) &&
+           SetSecurityDescriptorDacl(&descriptor, TRUE, dacl, FALSE) &&
+           SetSecurityDescriptorControl(&descriptor, SE_DACL_PROTECTED,
+                                        SE_DACL_PROTECTED);
+  }
+};
+
+int CreateDirectoryPath(const std::wstring& path, mode_t mode) {
+  SECURITY_ATTRIBUTES security{sizeof(security), nullptr, FALSE};
+  PrivateSecurity private_security;
+  if (mode != 0 && (mode & (S_IRWXG | S_IRWXO)) == 0) {
+    if (!private_security.Init(mode, true))
+      return Fail(GetLastError());
+    security.lpSecurityDescriptor = &private_security.descriptor;
+  }
+  return CreateDirectoryW(path.c_str(), &security) ? 0 : Fail(GetLastError());
+}
+
 int OpenPath(const std::wstring& path, int flags, mode_t mode) {
   DWORD disposition = OPEN_EXISTING;
   if (flags & O_CREAT) {
@@ -418,6 +480,12 @@ int OpenPath(const std::wstring& path, int flags, mode_t mode) {
   }
   SECURITY_ATTRIBUTES security{sizeof(security), nullptr,
                                (flags & O_CLOEXEC) == 0 ? FALSE : FALSE};
+  PrivateSecurity private_security;
+  if ((flags & O_CREAT) && mode != 0 && (mode & (S_IRWXG | S_IRWXO)) == 0) {
+    if (!private_security.Init(mode))
+      return Fail(GetLastError());
+    security.lpSecurityDescriptor = &private_security.descriptor;
+  }
   const HANDLE handle = CreateFileW(
       path.c_str(), AccessFor(flags),
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security,
@@ -479,6 +547,21 @@ std::wstring ResolveAt(int dirfd, const char* path) {
   std::wstring base = DirectoryPathOf(dirfd);
   if (base.empty()) {
     return {};
+  }
+  // GetFinalPathName returns an extended path, where appending literal dot
+  // components bypasses Win32 normalization. The base already comes from the
+  // opened directory, so removing its final component preserves fd semantics.
+  if (relative == L".")
+    return base;
+  if (relative == L"..") {
+    wchar_t parent[32768]{};
+    std::copy(base.begin(), base.end(), parent);
+    const HRESULT result = PathCchRemoveFileSpec(parent, 32768);
+    if (FAILED(result)) {
+      SetLastError(ERROR_INVALID_NAME);
+      return {};
+    }
+    return parent;
   }
   if (base.back() != L'\\') {
     base += L'\\';
@@ -883,20 +966,17 @@ int rmdir(const char* path) {
   return 0;
 }
 
-int mkdir(const char* path, mode_t) {
-  if (!CreateDirectoryW(Widen(path).c_str(), nullptr)) {
-    return Fail(GetLastError());
-  }
-  return 0;
+int mkdir(const char* path, mode_t mode) {
+  return CreateDirectoryPath(Widen(path), mode);
 }
 
-int mkdirat(int dirfd, const char* path, mode_t) {
+int mkdirat(int dirfd, const char* path, mode_t mode) {
   const auto resolved = ResolveAt(dirfd, path);
   if (resolved.empty()) {
     errno = EBADF;
     return -1;
   }
-  return CreateDirectoryW(resolved.c_str(), nullptr) ? 0 : Fail(GetLastError());
+  return CreateDirectoryPath(resolved, mode);
 }
 
 int access(const char* path, int mode) {
