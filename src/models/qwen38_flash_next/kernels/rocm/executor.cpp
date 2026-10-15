@@ -718,6 +718,8 @@ void Session::PreserveSnapshots(std::uint32_t position,
 }
 
 Session::~Session() {
+  if (frontier_host_ && owner_)
+    (void)hipStreamSynchronize(owner_->stream());
   try {
     PreserveSnapshots(0, 0);
   } catch (...) {
@@ -733,6 +735,8 @@ Session::~Session() {
   for (void* p : allocations_) {
     (void)hipFree(p);
   }
+  if (frontier_host_)
+    (void)hipHostFree(frontier_host_);
 }
 
 void Session::RestoreVisionLayout(const qwen::vision::RopeLayout& layout,
@@ -1204,13 +1208,6 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
             "pinned logits buffer", error_msg)) {
       return nullptr;
     }
-    void* frontier = nullptr;
-    if (!Check(hipHostMalloc(&frontier, c.vocab_size * sizeof(float),
-                             ResultHostFlags()),
-               "pinned frontier buffer", error_msg)) {
-      return nullptr;
-    }
-    e->frontier_host_ = static_cast<float*>(frontier);
     if (Tune().flag_waits) {
       void* done = nullptr;
       if (!Check(hipHostMalloc(&done, 64, hipHostMallocCoherent),
@@ -1359,6 +1356,14 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
     return nullptr;
   }
   s->max_context_ = max_context;
+  if (Tune().fast_sampling) {
+    void* frontier = nullptr;
+    if (!Check(hipHostMalloc(&frontier, c.vocab_size * sizeof(float),
+                             ResultHostFlags()),
+               "session frontier buffer", error_msg))
+      return nullptr;
+    s->frontier_host_ = static_cast<float*>(frontier);
+  }
   // Before sparse attention starts, pooling can lag by indexer_top_k
   // rows. Afterwards only an incomplete block precedes the current batch.
   // Completed block keys remain in block_k; their raw rows are dead.
@@ -3439,11 +3444,17 @@ bool Executor::UsePrimaryStream(std::string* error_msg) const {
   return true;
 }
 
-bool Executor::FinishFrontier(float* logits, std::string* error_msg) const {
-  if (waits_completed_ == frontier_ticket_ && !Wait("frontier", error_msg)) {
+bool Executor::FinishFrontier(const Session& session, float* logits,
+                              std::string* error_msg) const {
+  if (session.owner_ != this || !session.frontier_host_) {
+    AssignError(error_msg, "session has no deferred frontier");
     return false;
   }
-  std::copy_n(frontier_host_, config().vocab_size, logits);
+  if (waits_completed_ == session.frontier_ticket_ &&
+      !Wait("frontier", error_msg)) {
+    return false;
+  }
+  std::copy_n(session.frontier_host_, config().vocab_size, logits);
   return true;
 }
 
@@ -3464,13 +3475,13 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
   }
   session.spec_tokens_ = 0;
   Tl().Gpu(stream_, Timeline::kRollBegin, keep);
-  if (defer_frontier && logits == nullptr) {
+  if (defer_frontier && (logits == nullptr || !session.frontier_host_)) {
     defer_frontier = false;
   }
   if (logits != nullptr &&
       !CopyPinned(VerificationLogits() +
                       static_cast<std::size_t>(keep - 1) * c.vocab_size,
-                  defer_frontier ? frontier_host_ : logits_host_,
+                  defer_frontier ? session.frontier_host_ : logits_host_,
                   c.vocab_size * sizeof(float), hipMemcpyDeviceToHost, stream_,
                   "frontier download", error_msg)) {
     return false;
@@ -3526,7 +3537,7 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
   if (defer_frontier) {
     // Not flushed: the next draft joins this submission (a submission that
     // starts on its own waits for the previous one's retirement).
-    frontier_ticket_ = waits_completed_;
+    session.frontier_ticket_ = waits_completed_;
     unwaited_ = true;
     return true;
   }

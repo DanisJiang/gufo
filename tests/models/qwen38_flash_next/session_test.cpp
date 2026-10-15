@@ -6,12 +6,14 @@
 #include <future>
 #include <iostream>
 #include <latch>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "src/cli/serve/inference_backend.hpp"
+#include "src/core/platform/tuning.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "tests/models/qwen27b/sampling_cases.hpp"
@@ -683,6 +685,61 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
   std::cout << "batch independent_state_exact=1\n" << std::flush;
 }
 
+void CheckInterleavedDeferredFrontiers(
+    const std::shared_ptr<qfn::Model>& model) {
+  if (!gufo::platform::PlatformTuning().fast_sampling)
+    return;
+  std::string error;
+  std::array<std::unique_ptr<qfn::Session>, 2> sessions;
+  std::array<qfn::Session::DecodeResult, 2> expected;
+  std::array<std::vector<float>, 2> logits;
+  std::array<std::uint64_t, 2> rng{};
+  std::vector<sampling::SamplerState> samplers;
+  const std::array<std::string_view, 2> prompts{
+      "List three reasons to preserve orchard soil. Explain each reason.\n",
+      "Calculate the total of 17, 29 and 41. Show the arithmetic.\n"};
+  for (std::size_t i = 0; i < sessions.size(); ++i) {
+    sessions[i] = model->CreateSession(gufo::core::SessionMode::kSpeculative,
+                                       256, &error);
+    Require(sessions[i] != nullptr, error);
+    const auto prompt = model->Tokenize(prompts[i]);
+    Require(sessions[i]->Sync(prompt, &error), error);
+    const auto before = sessions[i]->SaveSnapshot(&error);
+    Require(before != nullptr, error);
+    const sampling::SamplingConfig config{
+        .temperature = 1.0F,
+        .top_k = 20,
+        .top_p = 0.95F,
+        .seed = static_cast<std::int64_t>(41 + i)};
+    const std::vector<sampling::TokenId> history(prompt.begin(), prompt.end());
+    sampling::SamplerState control(config, history);
+    Require(sessions[i]->DecodeStep(64, control, &expected[i], &error, false),
+            error);
+    Require(sessions[i]->Statistics().drafted > 0,
+            "deferred frontier control must exercise MTP");
+    const auto row = sessions[i]->Logits();
+    Require(!row.empty(), "missing isolated frontier");
+    logits[i].assign(row.begin(), row.end());
+    rng[i] = control.rng_state();
+    Require(sessions[i]->RestoreSnapshot(*before, &error), error);
+    samplers.emplace_back(config, history);
+  }
+  // Do not read either frontier until a peer has also decoded. An executor-
+  // shared pinned destination lets the second row overwrite the first one.
+  for (std::size_t i = 0; i < sessions.size(); ++i) {
+    qfn::Session::DecodeResult actual;
+    Require(sessions[i]->DecodeStep(64, samplers[i], &actual, &error, false),
+            error);
+    Require(actual.tokens == expected[i].tokens &&
+                samplers[i].rng_state() == rng[i],
+            "interleaved MTP changes tokens or RNG");
+  }
+  for (std::size_t i = 0; i < sessions.size(); ++i)
+    RequireExact(logits[i], sessions[i]->Logits(),
+                 "a peer overwrote a deferred frontier");
+  std::cout << "interleaved_deferred_frontiers_exact=1\n" << std::flush;
+}
+
 void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
                          std::uint32_t prompt_tokens = 4096,
                          bool with_image = false) {
@@ -1059,6 +1116,8 @@ int main(int argc, char** argv) {
       CheckServingEos(model);
       return 0;
     }
+    if (!prefill_only)
+      CheckInterleavedDeferredFrontiers(model);
     if (cache_only) {
       CheckMtpCacheReplay(model);
       return 0;

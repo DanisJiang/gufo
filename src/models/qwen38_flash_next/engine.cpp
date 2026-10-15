@@ -345,7 +345,8 @@ bool Session::EnsureFrontier(std::string* error_msg) const {
     return true;
   }
   frontier_pending_ = false;
-  return model_->executor_->FinishFrontier(logits_.data(), error_msg);
+  return model_->executor_->FinishFrontier(*session_, logits_.data(),
+                                           error_msg);
 }
 
 void Session::Reset() {

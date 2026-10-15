@@ -188,6 +188,10 @@ private:
   std::vector<NgramHistory> ngram_snapshots_;
   std::uint32_t spec_base_{0};    ///< position before the speculative batch
   std::uint32_t spec_tokens_{0};  ///< tokens of the pending speculative batch
+  // A peer may decode before this session consumes its deferred row. Keep
+  // the pinned destination and completion generation private to the session.
+  float* frontier_host_{nullptr};
+  std::uint64_t frontier_ticket_{0};
   MtpState mtp_;
   Control* control_{nullptr};
   std::uint32_t blocks_{0};  ///< host shadow of Control::blocks
@@ -307,7 +311,7 @@ public:
                               std::string* error_msg, float* logits = nullptr,
                               bool defer_frontier = false) const;
   /// Completes a deferred frontier download (Rollback) into `logits`.
-  [[nodiscard]] bool FinishFrontier(float* logits,
+  [[nodiscard]] bool FinishFrontier(const Session& session, float* logits,
                                     std::string* error_msg) const;
 
   /// Runs the draft block over `tokens` (at most max_batch) at the session's
@@ -742,11 +746,9 @@ private:
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile
   mutable int routed_tile_cols_{0};
   float* logits_host_{nullptr};
-  float* frontier_host_{nullptr};  ///< deferred rollback frontier row
-  /// Successful flag waits so far, and the count when the frontier copy was
-  /// queued: any later wait means the copy has landed.
+  /// Successful waits so far. Each session records its frontier copy's
+  /// generation; a later wait means that private copy has landed.
   mutable std::uint64_t waits_completed_{0};
-  mutable std::uint64_t frontier_ticket_{0};
   /// Options::draft_vocab: the draft head scores only these output rows (a copy
   /// of the selected rows of the output head); draft_ids_ maps a subset row
   /// back to its token id. Empty = the full vocabulary.

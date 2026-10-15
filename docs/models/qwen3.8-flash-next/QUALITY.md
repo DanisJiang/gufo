@@ -1,5 +1,17 @@
 # Qwen3.8 Flash-Next quality
 
+## Windows integration qualification
+
+The Windows integration keeps deferred frontier rows private to each session.
+`session_test --batch-only` includes `CheckInterleavedDeferredFrontiers`: two
+sampled MTP sessions decode before either consumes its logits, then compare
+tokens, RNG and full rows with isolated snapshot controls. Windows enables
+the fast-sampling path by default; Linux can exercise it with
+`GUFO_PLATFORM_TUNING=+fast_sampling`. This is an execution-consistency check,
+not an original-model accuracy oracle. It has been syntax-checked but has
+not been executed on a GPU for this integration. The Windows CPU/build
+workflow cannot qualify model execution or performance on Strix Halo.
+
 **PR #571's wave-owned prefill weights retain byte-exact logits:**
 99,328,000 F32 values after a 34,159-token code/prose prompt and 400 fixed
 continuation steps, batch 4096, capacity 65536, match the original PR control
