@@ -55,6 +55,28 @@ void CheckRead(DiskStore& store, const DiskPayload& payload,
   assert(stats.bytes == expected.size());
   assert(std::ranges::equal(actual, expected));
 }
+void ChecksumReference() {
+  // Independent bit-at-a-time CRC-64/ECMA. Exercise the hardware-folding
+  // threshold as well as unaligned inputs and incomplete final blocks.
+  std::array<std::uint8_t, 4112> bytes{};
+  for (std::size_t i = 0; i < bytes.size(); ++i)
+    bytes[i] = static_cast<std::uint8_t>(i * 37 + i / 11);
+  for (const std::size_t offset : {0, 1, 3, 7, 15}) {
+    for (const std::size_t size : {0, 1, 15, 16, 63, 255, 256, 257, 4096}) {
+      const auto view = std::span(bytes).subspan(offset, size);
+      for (const std::uint64_t initial : {0ULL, 0x123456789abcdef0ULL}) {
+        std::uint64_t crc = initial;
+        for (const auto byte : view) {
+          crc ^= std::uint64_t(byte) << 56;
+          for (int bit = 0; bit < 8; ++bit)
+            crc = (crc << 1) ^ ((crc >> 63) ? 0x42f0e1eba9ea3693ULL : 0ULL);
+        }
+        assert(DiskChecksum(view, initial) == crc);
+      }
+    }
+  }
+}
+
 void RoundTripAndCorruption() {
   Directory directory;
   ResourceLedger ledger{{1ULL << 24, 1ULL << 24, 0, 0}};
@@ -109,6 +131,7 @@ void RoundTripAndCorruption() {
 }  // namespace
 
 int main() {
+  ChecksumReference();
   RoundTripAndCorruption();
   std::cout << "portable cache disk contracts passed\n";
 }

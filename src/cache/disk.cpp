@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #ifdef _WIN32
+#include <intrin.h>
 #include <io.h>
 #include <windows.h>
 #else
@@ -455,8 +456,18 @@ __attribute__((target("pclmul,ssse3"))) std::uint64_t ChecksumFold(
 }  // namespace
 std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
                            std::uint64_t crc) {
-  static const bool folding =
-      __builtin_cpu_supports("pclmul") && __builtin_cpu_supports("ssse3");
+  static const bool folding = [] {
+#ifdef _WIN32
+    // The MSVC ABI does not provide Clang's GNU CPU dispatch runtime.
+    // CPUID leaf 1 ECX: PCLMULQDQ bit 1 and SSSE3 bit 9 (128-bit SSE state).
+    int registers[4]{};
+    __cpuid(registers, 1);
+    constexpr int required = (1 << 1) | (1 << 9);
+    return (registers[2] & required) == required;
+#else
+    return __builtin_cpu_supports("pclmul") && __builtin_cpu_supports("ssse3");
+#endif
+  }();
   if (folding && bytes.size() >= 256)
     return ChecksumFold(bytes, crc);
   return ChecksumTable(bytes, crc);
