@@ -1,6 +1,10 @@
 #include "src/cli/serve/component_text_cache.hpp"
 
+#ifdef _WIN32
+#include <openssl/rand.h>
+#else
 #include <sys/random.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -214,8 +218,12 @@ struct ComponentTextCache::Impl {
     crypto::Sha256Hasher hash;
     hash.Update(identity);
     digest = hash.Finish();
+#ifdef _WIN32
+    if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1)
+#else
     if (getrandom(nonce.data(), nonce.size(), 0) !=
         static_cast<ssize_t>(nonce.size()))
+#endif
       throw std::runtime_error("cannot obtain cache publication nonce");
     index.Register(identity, resources->adapter->Components(), digest);
     if (options) {

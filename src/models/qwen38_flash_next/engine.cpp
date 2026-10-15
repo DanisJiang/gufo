@@ -1032,11 +1032,11 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       MtpEnabled() && cap > 1
           ? 1 + (batch_drafts ? std::min<std::uint32_t>(*batch_drafts, cap - 1)
                  : survival   ? std::min<std::uint32_t>(
-                                    kMaxMtpDraftTokens,
-                                    static_cast<std::uint32_t>(cap - 1))
-                              : draft_length_.Choose(
-                                    static_cast<std::uint32_t>(cap - 1),
-                                    static_cast<std::uint32_t>(tokens_.size())))
+                                  kMaxMtpDraftTokens,
+                                  static_cast<std::uint32_t>(cap - 1))
+                            : draft_length_.Choose(
+                                  static_cast<std::uint32_t>(cap - 1),
+                                  static_cast<std::uint32_t>(tokens_.size())))
           : cap;
   if (width == 0) {
     result->stop = true;
