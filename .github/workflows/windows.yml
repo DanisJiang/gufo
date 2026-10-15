@@ -19,8 +19,8 @@ jobs:
     env:
       GUFO_ROCM: C:\TheRock\build
       VCPKG_DEFAULT_TRIPLET: x64-windows
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}\vcpkg-binary-cache
-      CCACHE_DIR: ${{ runner.temp }}\gufo-ccache
+      VCPKG_DEFAULT_BINARY_CACHE: C:\gufo-ci-cache\vcpkg-binaries
+      CCACHE_DIR: C:\gufo-ci-cache\ccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
