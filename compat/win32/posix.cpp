@@ -890,6 +890,15 @@ int mkdir(const char* path, mode_t) {
   return 0;
 }
 
+int mkdirat(int dirfd, const char* path, mode_t) {
+  const auto resolved = ResolveAt(dirfd, path);
+  if (resolved.empty()) {
+    errno = EBADF;
+    return -1;
+  }
+  return CreateDirectoryW(resolved.c_str(), nullptr) ? 0 : Fail(GetLastError());
+}
+
 int access(const char* path, int mode) {
   const DWORD attributes = GetFileAttributesW(Widen(path).c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES) {
@@ -1390,6 +1399,20 @@ unsigned long long gufo_total_physical_bytes(void) {
   MEMORYSTATUSEX status{};
   status.dwLength = sizeof(status);
   return GlobalMemoryStatusEx(&status) ? status.ullTotalPhys : 0;
+}
+
+int gufo_renameat_noreplace(int olddirfd, const char* oldpath, int newdirfd,
+                          const char* newpath) {
+  const auto from = ResolveAt(olddirfd, oldpath);
+  const auto to = ResolveAt(newdirfd, newpath);
+  if (from.empty() || to.empty()) {
+    errno = EBADF;
+    return -1;
+  }
+  // No REPLACE_EXISTING or COPY_ALLOWED: this is a same-volume atomic
+  // rename that cannot overwrite an already published payload/manifest.
+  return MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH)
+             ? 0 : Fail(GetLastError());
 }
 
 int renameat(int olddirfd, const char* oldpath, int newdirfd,

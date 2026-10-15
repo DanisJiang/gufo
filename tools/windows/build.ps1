@@ -5,7 +5,7 @@
 #   - TheRock 10.0.0 for Windows gfx1151, extracted to C:\TheRock\build:
 #     https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx1151-10.0.0.tar.gz
 #     (SHA-256 1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38)
-#   - vcpkg at C:\vcpkg with: icu curl openssl libpng libjpeg-turbo (x64-windows)
+#   - vcpkg at C:\vcpkg with: icu curl openssl libpng libjpeg-turbo libwebp (x64-windows)
 #   - Visual Studio Build Tools (MSVC STL + Windows SDK; the compiler is TheRock clang)
 #   - CMake 3.21+, and ninja on PATH or at C:\tools\ninja\ninja.exe
 #
@@ -61,22 +61,28 @@ $clang = "$Rocm\lib\llvm\bin\clang.exe".Replace('\', '/')
 $clangxx = "$Rocm\lib\llvm\bin\clang++.exe".Replace('\', '/')
 
 $build = Join-Path $root "build\$Preset"
+$releaseVersion = (Get-Content (Join-Path $root "version.txt") -TotalCount 1).Trim()
+$revision = "unknown"
+if ((Test-Path (Join-Path $root ".git")) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+  $revision = (& git -C $root describe --always --dirty).Trim()
+}
 if ($Reconfigure -and (Test-Path "$build\CMakeCache.txt")) {
   Remove-Item "$build\CMakeCache.txt"
 }
-if (-not (Test-Path "$build\CMakeCache.txt")) {
-  cmake -S $root --preset $Preset `
-    "-DCMAKE_MAKE_PROGRAM=$($Ninja.Replace('\', '/'))" `
-    "-DCMAKE_C_COMPILER=$clang" `
-    "-DCMAKE_CXX_COMPILER=$clangxx" `
-    "-DCMAKE_HIP_COMPILER=$clangxx" `
-    "-DCMAKE_TOOLCHAIN_FILE=$($Vcpkg.Replace('\', '/'))/scripts/buildsystems/vcpkg.cmake" `
-    "-DVCPKG_TARGET_TRIPLET=x64-windows" `
-    "-DCMAKE_PREFIX_PATH=$($Rocm.Replace('\', '/'))" `
-    "-DCMAKE_LINKER_TYPE=LLD" `
-    @CMakeArgs
-  if ($LASTEXITCODE -ne 0) { throw "configure failed" }
-}
+# Refresh dependency discovery and revision metadata on every build.
+cmake -S $root --preset $Preset `
+  "-DCMAKE_MAKE_PROGRAM=$($Ninja.Replace('\', '/'))" `
+  "-DCMAKE_C_COMPILER=$clang" `
+  "-DCMAKE_CXX_COMPILER=$clangxx" `
+  "-DCMAKE_HIP_COMPILER=$clangxx" `
+  "-DCMAKE_TOOLCHAIN_FILE=$($Vcpkg.Replace('\', '/'))/scripts/buildsystems/vcpkg.cmake" `
+  "-DVCPKG_TARGET_TRIPLET=x64-windows" `
+  "-DCMAKE_PREFIX_PATH=$($Rocm.Replace('\', '/'))" `
+  "-DCMAKE_LINKER_TYPE=LLD" `
+  "-DGUFO_RELEASE_VERSION=$releaseVersion" `
+  "-DGUFO_REVISION=$revision" `
+  @CMakeArgs
+if ($LASTEXITCODE -ne 0) { throw "configure failed" }
 
 $buildArgs = @("--build", $build)
 if ($Target) { $buildArgs += @("--target", $Target) }

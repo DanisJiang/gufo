@@ -18,7 +18,7 @@ downloads. `tools\windows\package.ps1` makes the zip from a release build.
 | Piece | Default location | Notes |
 | --- | --- | --- |
 | TheRock ROCm 10.0.0 (Windows, gfx1151) | `C:\TheRock\build` | [`therock-dist-windows-gfx1151-10.0.0.tar.gz`](https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx1151-10.0.0.tar.gz), SHA-256 `1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38`; extract so that `C:\TheRock\build\bin` exists. Its clang compiles C, C++ and HIP |
-| vcpkg | `C:\vcpkg` | `vcpkg install icu curl openssl libpng libjpeg-turbo --triplet x64-windows` |
+| vcpkg | `C:\vcpkg` | `vcpkg install icu curl openssl libpng libjpeg-turbo libwebp --triplet x64-windows` |
 | Visual Studio Build Tools | any | "Desktop development with C++": MSVC STL + Windows SDK only; tested with VS 18 (MSVC 14.51) |
 | CMake 3.21+ and Ninja | `PATH`, or Ninja at `C:\tools\ninja` | |
 | Dedicated GPU memory | AMD Software > Performance > Tuning > Variable Graphics Memory | 96 GB for Qwen3.8-Flash-Next at 256K context; see [Memory](#memory) |
@@ -197,7 +197,26 @@ carve-out works, but the load takes ~2 minutes and decode is slower.
 
 ## Test status
 
-- All Flash-Next operator tests pass, plus 86/92 CPU-labelled tests.
+- The integration branch includes upstream through `43ad9a5` (October 14,
+  2026), including advancing thinking-prompt checkpoints and the Flash-Next
+  component cache. Windows keeps its WDDM budget, device allocations,
+  hot-first weight placement, completion flags and alternating decode streams.
+- [Windows build](../.github/workflows/windows.yml) checks native cache/server
+  CPU contracts, compiles the production gfx1151 binary and uploads a bundled
+  zip. It needs no model files or GPU. It runs on integration branch pushes
+  and can also be dispatched manually.
+- Model execution and performance require a Windows Strix Halo machine.
+  The imported benchmark cards describe Linux measurements; the current
+  integration has no newly measured Windows speed or GPU quality claim.
+- The previous Windows release (`2eb0778`) reported all Flash-Next operator
+  tests and 86/92 CPU-labelled tests passing. Those results do not qualify
+  this integration's new kernels or cache adapter.
+- ELF fault interposition and fork-based cache crash/death cases remain
+  Linux-only. `cache_disk_portable_test` runs on both platforms and covers
+  publication, exclusive ownership, restart, payload corruption and orphan
+  reclamation. Windows uses native directory enumeration and no-replace
+  write-through renames; power-loss durability remains unqualified (the
+  existing compatibility layer cannot flush read-only directory handles).
 - Not ported: Linux-only Python dev tools (`h3_profile*`, `qwen27b.tools`,
   TTS reference verification needs numpy), and `video_jobs_test` needs
   symlink privileges (Developer Mode).

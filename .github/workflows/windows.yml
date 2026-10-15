@@ -1,0 +1,93 @@
+name: Windows build
+
+on:
+  push:
+    branches: ['integration/upstream-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      GUFO_ROCM: C:\TheRock\build
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout pinned vcpkg
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: 20ceb8adbf0504d4b0d5e4058a32f9d4fc896391
+          path: vcpkg
+
+      - name: Install qualified TheRock SDK
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'therock.tar.gz'
+          Invoke-WebRequest 'https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx1151-10.0.0.tar.gz' -OutFile $archive
+          $expected = '1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'TheRock checksum mismatch'
+          }
+          New-Item -ItemType Directory -Force $env:GUFO_ROCM | Out-Null
+          tar -xf $archive -C $env:GUFO_ROCM
+          if ($LASTEXITCODE -ne 0) { throw 'TheRock extraction failed' }
+          Remove-Item $archive
+
+      - name: Install CPU dependencies
+        shell: pwsh
+        run: |
+          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          & .\vcpkg\vcpkg.exe install icu curl openssl libpng libjpeg-turbo libwebp --triplet x64-windows
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
+
+      - name: Build CPU contracts
+        shell: pwsh
+        run: |
+          $vcpkg = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
+          & .\tools\windows\build.ps1 -Preset cpu-test -Target gufo -Rocm $env:GUFO_ROCM -Vcpkg $vcpkg -Jobs 2
+          if ($LASTEXITCODE -ne 0) { throw 'CPU CLI build failed' }
+          cmake --build build/cpu-test --parallel 2 --target cache_adapter_lifecycle_test cache_checkpoint_test cache_prefix_index_test cache_retention_test cache_streaming_test cache_disk_portable_test component_text_cache_test text_model_runner_test continuation_disk_store_test text_generation_scheduler_test openai_chat_test http_server_test audio_websocket_test qwen_chat_template_test platform_tuning_test json_constraint_test
+          if ($LASTEXITCODE -ne 0) { throw 'CPU contract build failed' }
+
+      - name: Run cache and server contracts
+        shell: pwsh
+        run: |
+          ctest --test-dir build/cpu-test --output-on-failure --timeout 60 -R '^(cache_adapter_lifecycle_test|cache_checkpoint_test|cache_prefix_index_test|cache_retention_test|cache_streaming_test|cache_disk_portable_test|component_text_cache_test|text_model_runner_test|continuation_disk_store_test|text_generation_scheduler_test|openai_chat_test|http_server_test|audio_websocket_test|qwen_chat_template_test|platform_tuning_test|json_constraint_test)$'
+          if ($LASTEXITCODE -ne 0) { throw 'Windows CPU contracts failed' }
+
+      - name: Build production gfx1151 binary
+        shell: pwsh
+        run: |
+          & .\tools\windows\build.ps1 -Preset release -Rocm $env:GUFO_ROCM -Vcpkg (Join-Path $env:GITHUB_WORKSPACE 'vcpkg') -Jobs 2
+          if ($LASTEXITCODE -ne 0) { throw 'Production build failed' }
+          $version = (Get-Content version.txt -TotalCount 1).Trim()
+          & .\tools\windows\package.ps1 -Version "$version-$($env:GITHUB_SHA.Substring(0, 7))" -Vcpkg (Join-Path $env:GITHUB_WORKSPACE 'vcpkg')
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gufo-windows-${{ github.sha }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-test-logs-${{ github.sha }}
+          path: build/cpu-test/Testing/Temporary/*.log
+          if-no-files-found: ignore
+          retention-days: 14

@@ -9,7 +9,8 @@
 #   powershell -ExecutionPolicy Bypass -File tools\windows\package.ps1 [-Version 2026-10-03] [-Out dist]
 param(
   [string]$Version = (Get-Date -Format "yyyy-MM-dd"),
-  [string]$Out = ""
+  [string]$Out = "",
+  [string]$Vcpkg = "C:\vcpkg"
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
@@ -45,9 +46,18 @@ Copy-Item $omp.FullName $bin
 Copy-Item (Join-Path $root "start.cmd") $stage
 Copy-Item (Join-Path $root "tools\windows\launcher.ps1"), (Join-Path $root "tools\windows\inventory.ps1") (Join-Path $stage "tools\windows")
 Copy-Item (Join-Path $root "LICENSE") $stage
+Copy-Item (Join-Path $root "NOTICE"), (Join-Path $root "THIRD_PARTY_NOTICES.md") $stage
+Copy-Item (Join-Path $root "licenses") $stage -Recurse
+foreach ($copyright in Get-ChildItem (Join-Path $Vcpkg "installed\x64-windows\share\*\copyright")) {
+  $port = Split-Path (Split-Path $copyright.FullName) -Leaf
+  $destination = Join-Path $stage "licenses\vcpkg\$port"
+  New-Item -ItemType Directory -Force $destination | Out-Null
+  Copy-Item $copyright.FullName $destination
+}
 Copy-Item (Join-Path $root "tools\windows\prebuilt\README.txt"), (Join-Path $root "tools\windows\prebuilt\THIRD-PARTY.txt") $stage
 $commit = (& git -C $root rev-parse --short HEAD 2>$null)
-Add-Content (Join-Path $stage "README.txt") "`r`nBuilt from https://github.com/pixmaate/gufo commit $commit ($Version)."
+$source = (& git -C $root remote get-url origin) -replace '\.git$', ''
+Add-Content (Join-Path $stage "README.txt") "`r`nBuilt from $source commit $commit ($Version)."
 
 $zip = Join-Path $Out "$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

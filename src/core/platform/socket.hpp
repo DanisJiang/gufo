@@ -5,6 +5,7 @@
 // Sockets stay `int` descriptors everywhere else; on Windows the value is the
 // SOCKET handle, which always fits in 32 bits.
 
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
@@ -66,6 +67,22 @@ inline int CloseSocket(int fd) noexcept {
   return ::closesocket(static_cast<SOCKET>(fd));
 #else
   return ::close(fd);
+#endif
+}
+
+inline int SetSocketBlocking(int fd, bool blocking) noexcept {
+#ifdef _WIN32
+  u_long mode = blocking ? 0 : 1;
+  const int result = ::ioctlsocket(static_cast<SOCKET>(fd), FIONBIO, &mode);
+  if (result != 0)
+    detail::SetErrnoFromSocketError();
+  return result;
+#else
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  return flags < 0
+             ? -1
+             : ::fcntl(fd, F_SETFL,
+                       blocking ? flags & ~O_NONBLOCK : flags | O_NONBLOCK);
 #endif
 }
 
@@ -187,6 +204,24 @@ inline int SetSocketTimeout(int fd, int name,
                            timeout - seconds)
                            .count())};
   return SetSocketOption(fd, SOL_SOCKET, name, tv);
+#endif
+}
+
+inline std::chrono::microseconds GetSocketTimeout(int fd, int name) noexcept {
+#ifdef _WIN32
+  DWORD ms = 0;
+  int size = sizeof(ms);
+  if (::getsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, name,
+                   reinterpret_cast<char*>(&ms), &size) != 0)
+    return {};
+  return std::chrono::milliseconds(ms);
+#else
+  timeval tv{};
+  socklen_t size = sizeof(tv);
+  if (::getsockopt(fd, SOL_SOCKET, name, &tv, &size) != 0)
+    return {};
+  return std::chrono::seconds(tv.tv_sec) +
+         std::chrono::microseconds(tv.tv_usec);
 #endif
 }
 
