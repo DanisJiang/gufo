@@ -2,7 +2,7 @@ name: Windows build
 
 on:
   push:
-    branches: ['integration/upstream-*']
+    branches: [main]
   workflow_dispatch:
 
 permissions:

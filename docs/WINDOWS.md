@@ -8,7 +8,7 @@ builds are unaffected: the port lives in `compat/win32`, Windows-only files and
 ## Prebuilt
 
 The [Windows build workflow](https://github.com/DanisJiang/gufo-windows/actions/workflows/windows.yml)
-uploads integration packages as build artifacts; the original port's older
+uploads Windows packages as build artifacts; the original port's older
 packages remain under its [releases](https://github.com/pixmaate/gufo/releases).
 The zip contains `gufo.exe` with the ROCm, vcpkg and Visual C++
 runtimes in `bin\`, and `start.cmd`. It needs only a Strix Halo (gfx1151)
@@ -199,13 +199,13 @@ carve-out works, but the load takes ~2 minutes and decode is slower.
 
 ## Test status
 
-- The integration branch includes upstream through `43ad9a5` (October 14,
+- This fork's `main` includes upstream through `43ad9a5` (October 14,
   2026), including advancing thinking-prompt checkpoints and the Flash-Next
   component cache. Windows keeps its WDDM budget, device allocations,
   hot-first weight placement, completion flags and alternating decode streams.
 - [Windows build](../.github/workflows/windows.yml) checks native cache/server
   CPU contracts, compiles the production gfx1151 binary and uploads a bundled
-  zip. It needs no model files or GPU. It runs on integration branch pushes
+  zip. It needs no model files or GPU. It runs on pushes to `main`
   and can also be dispatched manually.
 - Model execution and performance require a Windows Strix Halo machine.
   The imported benchmark cards describe Linux measurements; the current

@@ -79,6 +79,9 @@ quality; successful optimizations become the default, without extra switches.
 
 ## Development
 
+- This personal fork uses `main` directly: commit and push task work to
+  `origin/main`. Do not create development branches or pull requests unless
+  the user explicitly asks.
 - Keep model code, tests, tools and numerical contracts with their model.
 - Use the shared Qwen control-token constants for framing; see
   [src/models/qwen/AGENTS.md](src/models/qwen/AGENTS.md). Inspect their definitions
