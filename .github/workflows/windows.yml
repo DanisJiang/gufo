@@ -99,6 +99,25 @@ jobs:
           & .\tools\windows\package.ps1 -Version "$version-$($env:GITHUB_SHA.Substring(0, 7))" -Vcpkg (Join-Path $env:GITHUB_WORKSPACE 'vcpkg')
           if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
 
+      - name: Smoke-test packaged CLI
+        shell: pwsh
+        run: |
+          $binaries = @(Get-ChildItem 'dist/gufo-windows-*/bin/gufo.exe')
+          if ($binaries.Count -ne 1) { throw 'Expected one packaged executable' }
+          $binary = $binaries[0]
+          $originalPath = $env:PATH
+          try {
+            # Check app-local DLLs without the build toolchain on PATH.
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            Push-Location $binary.DirectoryName
+            try {
+              & $binary.FullName --version
+              if ($LASTEXITCODE -ne 0) { throw 'Packaged version command failed' }
+              & $binary.FullName --help
+              if ($LASTEXITCODE -ne 0) { throw 'Packaged help command failed' }
+            } finally { Pop-Location }
+          } finally { $env:PATH = $originalPath }
+
       - name: Upload Windows package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
