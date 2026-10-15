@@ -1047,7 +1047,8 @@ void TestAutomaticTools() {
         std::vector<float> after_call(259, -INFINITY);
         after_call['a'] = 1;
         after_call[256] = 0;
-        assert(auto(sampler).Sample(after_call) == 256);
+        auto completion_probe = sampler;
+        assert(completion_probe.Sample(after_call) == 256);
         sampler.Accept(257);  // Empty pieces preserve the ordinary path.
         sampler.Accept(256);  // Natural EOS is allowed without another call.
         sampler = before_call;
