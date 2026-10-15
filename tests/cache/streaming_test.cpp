@@ -682,7 +682,8 @@ void QueueBoundsAndYield() {
   assert(stats.accepted == 3);
   // While the writer yields, committed source ownership doesn't hold live
   // slot readers or the disk metadata lock.
-  auto lookup = std::async(std::launch::async, [&] { return disk.Open({99}); });
+  auto lookup = std::async(std::launch::async,
+                           [&] { return disk.Open({99}).has_value(); });
   assert(lookup.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
   assert(!lookup.get());
   auto counters = std::async(std::launch::async, [&] { return disk.Stats(); });

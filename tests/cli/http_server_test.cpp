@@ -2159,8 +2159,8 @@ void TestDeviceLossWhileWriterBlocked() {
   });
   const int fd = server.Connect();
   const int receive_buffer = 1024;
-  assert(::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer,
-                      sizeof(receive_buffer)) == 0);
+  assert(gufo::platform::SetSocketOption(fd, SOL_SOCKET, SO_RCVBUF,
+                                         receive_buffer) == 0);
   const std::string request = "POST /blocked HTTP/1.1\r\n\r\n";
   assert(gufo::platform::SocketSend(fd, request.data(), request.size(),
                                     MSG_NOSIGNAL) ==

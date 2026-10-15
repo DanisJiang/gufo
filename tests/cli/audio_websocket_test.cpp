@@ -117,11 +117,38 @@ private:
   }
 };
 
+std::array<int, 2> ConnectedSockets() {
+  std::array<int, 2> fds{};
+#ifdef _WIN32
+  // Winsock has no socketpair. Use a connected loopback TCP pair so the same
+  // frame/idle assertions exercise real sockets on both platforms.
+  const int listener = static_cast<int>(::socket(AF_INET, SOCK_STREAM, 0));
+  assert(listener >= 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  assert(::bind(listener, reinterpret_cast<sockaddr*>(&address),
+                sizeof(address)) == 0);
+  assert(::listen(listener, 1) == 0);
+  socklen_t length = sizeof(address);
+  assert(::getsockname(listener, reinterpret_cast<sockaddr*>(&address),
+                       &length) == 0);
+  fds[1] = static_cast<int>(::socket(AF_INET, SOCK_STREAM, 0));
+  assert(fds[1] >= 0);
+  assert(::connect(fds[1], reinterpret_cast<sockaddr*>(&address), length) == 0);
+  fds[0] = static_cast<int>(::accept(listener, nullptr, nullptr));
+  assert(fds[0] >= 0);
+  gufo::platform::CloseSocket(listener);
+#else
+  assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds.data()) == 0);
+#endif
+  return fds;
+}
+
 // The server's receive timeout is an idle limit. A client that only listens
 // to streamed output must stay connected; a silent session closes cleanly.
 void ListeningClientIsNotIdle() {
-  std::array<int, 2> fds{};
-  assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds.data()) == 0);
+  const auto fds = ConnectedSockets();
   assert(gufo::platform::SetSocketTimeout(fds[0], SO_RCVTIMEO,
                                           std::chrono::milliseconds(300)) == 0);
   assert(gufo::platform::SetSocketTimeout(fds[1], SO_RCVTIMEO,
