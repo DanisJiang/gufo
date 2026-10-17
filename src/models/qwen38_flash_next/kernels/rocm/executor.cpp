@@ -1219,16 +1219,24 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       e->done_flag_ = static_cast<std::uint32_t*>(done);
       *e->done_flag_ = 0;
     }
+    // The compute-copy route accesses these pages directly. Keep its CPU
+    // reads and GPU reads coherent across the count event and tile upload.
+    const unsigned routing_host_flags =
+        Tune().copy_kernels ? hipHostMallocMapped | hipHostMallocCoherent
+                            : hipHostMallocDefault;
     void* counts = nullptr;
-    if (!Check(hipHostMalloc(&counts, c.num_experts * sizeof(std::uint32_t)),
+    if (!Check(hipHostMalloc(&counts, c.num_experts * sizeof(std::uint32_t),
+                             routing_host_flags),
                "pinned expert counts", error_msg)) {
       return nullptr;
     }
     e->counts_host_ = static_cast<std::uint32_t*>(counts);
     void* tiles = nullptr;
-    if (!Check(hipHostMalloc(&tiles, 3 * RoutedTileCapacity(slots, c) *
-                                         sizeof(std::int32_t)),
-               "pinned routed tile map", error_msg)) {
+    if (!Check(
+            hipHostMalloc(
+                &tiles, 3 * RoutedTileCapacity(slots, c) * sizeof(std::int32_t),
+                routing_host_flags),
+            "pinned routed tile map", error_msg)) {
       return nullptr;
     }
     e->tiles_host_ = static_cast<std::int32_t*>(tiles);
@@ -1927,10 +1935,10 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   }
   routed_tile_cols_ = qfn_mmq_routed_tile_cols_for_counts(
       counts_host_, static_cast<int>(c.num_experts));
-  return n_tiles == 0 || Check(hipMemcpyAsync(s_.routed_tiles, tiles_host_,
-                                              n_tiles * sizeof(std::int32_t),
-                                              hipMemcpyHostToDevice, stream_),
-                               "routed tile map upload", error_msg);
+  return n_tiles == 0 ||
+         CopyPinned(tiles_host_, s_.routed_tiles,
+                    n_tiles * sizeof(std::int32_t), hipMemcpyHostToDevice,
+                    stream_, "routed tile map upload", error_msg);
 }
 
 bool Executor::Experts(const DeviceTensor& w, const float* x,
@@ -2801,10 +2809,12 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   if (ExpertMatrixRows(n_tokens)) {
     ExpertCounts(s_.ids, s_.expert_counts, n_tokens, c.num_experts, used,
                  stream_);
-    if (!Check(hipMemcpyAsync(counts_host_, s_.expert_counts,
-                              c.num_experts * sizeof(std::uint32_t),
-                              hipMemcpyDeviceToHost, stream_),
-               "expert counts download", error_msg) ||
+    // Keep this small control transfer on the compute queue on Windows.
+    // A PAL compute/SDMA fence hand-off can otherwise stall the count event.
+    if (!CopyPinned(s_.expert_counts, counts_host_,
+                    c.num_experts * sizeof(std::uint32_t),
+                    hipMemcpyDeviceToHost, stream_, "expert counts download",
+                    error_msg) ||
         !Check(hipEventRecord(counts_ready_, stream_), "expert counts event",
                error_msg)) {
       return false;

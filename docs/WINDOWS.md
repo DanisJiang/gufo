@@ -188,7 +188,7 @@ example `GUFO_PLATFORM_TUNING=+fast_sampling` to try one on Linux, or
 
 | Switch | What it does | Measured on Windows |
 | --- | --- | --- |
-| `copy_kernels` | Qwen3.8-Flash-Next decode copies (uploads, downloads, rollback, hidden carry) as small kernels instead of `hipMemcpyAsync` | A copy-engine hand-off costs ~30 us per graph node and ~150 us per compute/copy switch; rollback 8.5 -> ~2 ms, probe +7-8% with `recorded_rollback` |
+| `copy_kernels` | Qwen3.8-Flash-Next decode copies and MoE routing control transfers as small kernels instead of `hipMemcpyAsync` | Decode: a copy-engine hand-off costs ~30 us per graph node and ~150 us per compute/copy switch; rollback 8.5 -> ~2 ms, probe +7-8% with `recorded_rollback`. Routing mitigation is not yet GPU-qualified. |
 | `recorded_rollback` | The speculative state rollback replays as one recorded graph per kept length | (with `copy_kernels`, above) |
 | `keep_rollback_rows` | Rollback rows survive session resets and snapshot restores | Verify and rollback graphs are captured once per session instead of on every request |
 | `flush_before_wait` | `hipStreamQuery` before blocking on n-gram rows: HIP on Windows only submits queued launches at a flush | Draft-to-verify GPU idle 1.9 -> 1.15 ms per cycle |
@@ -203,6 +203,41 @@ Checked on Windows, all decode switches on against all off (the Linux path):
 fixed-seed sampled decode produces byte-identical text. All off decodes
 7.6-9.5% slower on Windows (sampled probe, prose / code / reasoning 32.0 /
 34.3 / 44.1 against 34.5 / 37.2 / 48.3 tok/s).
+
+## Windows HIP routing stalls
+
+A report from a separate Windows machine observed an inference thread waiting
+for the expert-count event at 69,632 tokens. One of two baseline runs hung;
+both runs with `PAL_DISABLE_SDMA=1` completed, including long inputs and two
+concurrent requests. The input and full diagnostic record are not available
+in this checkout. This supports an SDMA-related mitigation, not a confirmed
+root cause. The [similar upstream hang](https://github.com/ROCm/rocm-systems/issues/12535)
+was reported on different hardware and does not establish the same cause here.
+
+Official Gufo `v0.16.0` still uses `hipMemcpyAsync` for the expert-count
+download and routed-tile upload. This fork now sends both through its existing
+compute-copy path when `copy_kernels` is enabled (the Windows default), with
+coherent mapped host buffers. The count completion event is still required;
+the host never consumes unfinished counts. No process-wide SDMA setting or
+vendor DLL is changed.
+
+This is a candidate mitigation, not a claim that the reported hang is fixed.
+It only removes these routing transfers' compute/SDMA hand-offs; an earlier
+submission can still be the cause. Before removing an existing
+`PAL_DISABLE_SDMA=1` workaround, repeat the failing input and two-session
+workload with SDMA enabled, retaining output correctness, per-request prefill
+and decode timings, cache histories, revision, runtime and driver versions.
+The routing operator check independently verifies the 2 KiB count download
+and host-built tile maps with poisoned buffers and boundary guards:
+
+```powershell
+.\tools\windows\build.ps1 -Preset gpu-test -Target qwen38_flash_next_moe_ids_ops_test
+ctest --test-dir build/gpu-test -R '^qwen38_flash_next\.moe_ids_ops$' --output-on-failure --timeout 60
+```
+
+The check requires an AMD GPU but no model files. Hosted Windows CI compiles
+it; neither the operator's numerical execution nor the original long-context
+hang has been validated by that CPU-only runner.
 
 ## Memory
 

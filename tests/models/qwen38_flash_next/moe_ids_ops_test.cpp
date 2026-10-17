@@ -168,6 +168,80 @@ bool Same(const Maps& a, const Maps& b, const char* what) {
   return ok;
 }
 
+// Exercise the prefill control round trip without model weights: GPU counts
+// become CPU-visible at their event, then a host tile map returns unchanged
+// through the compute queue. Expected counts come directly from the input IDs.
+void CheckRoutingTransfers(int n_tokens) {
+  namespace q = gufo::models::qwen38_flash_next::rocm;
+  const auto ids = MakeIds(n_tokens, 0x8172ABCDU + n_tokens);
+  std::vector<std::uint32_t> expected_counts(kExperts);
+  for (const auto id : ids)
+    if (id >= 0)
+      ++expected_counts[id];
+  const auto capacity = ids.size() + kExperts + 1;
+  constexpr auto flags = hipHostMallocMapped | hipHostMallocCoherent;
+  constexpr std::int32_t guard = -771;
+  std::int32_t *device_ids{}, *device_tiles{}, *host_tiles{}, *echo{};
+  std::uint32_t *device_counts{}, *host_counts{};
+  hipStream_t stream{};
+  hipEvent_t ready{};
+  CheckHip(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking), "stream");
+  CheckHip(hipEventCreateWithFlags(&ready, hipEventDisableTiming), "event");
+  CheckHip(hipMalloc(&device_ids, ids.size() * sizeof(std::int32_t)), "ids");
+  CheckHip(hipMalloc(&device_counts, kExperts * sizeof(std::uint32_t)),
+           "counts");
+  CheckHip(hipMalloc(&device_tiles, capacity * sizeof(std::int32_t)), "tiles");
+  CheckHip(hipHostMalloc(&host_counts, (kExperts + 1) * sizeof(std::uint32_t),
+                         flags),
+           "pinned counts");
+  CheckHip(hipHostMalloc(&host_tiles, capacity * sizeof(std::int32_t), flags),
+           "pinned tiles");
+  CheckHip(hipHostMalloc(&echo, capacity * sizeof(std::int32_t), flags),
+           "pinned echo");
+  CheckHip(hipMemcpy(device_ids, ids.data(), ids.size() * sizeof(std::int32_t),
+                     hipMemcpyHostToDevice),
+           "ids upload");
+  for (const auto tile_rows : {16U, 48U, 64U, 128U}) {
+    std::fill_n(host_counts, kExperts + 1, 0xDEADBEEFU);
+    q::ExpertCounts(device_ids, device_counts, n_tokens, kExperts, kUsed,
+                    stream);
+    q::CopyMapped(device_counts, host_counts, kExperts * sizeof(std::uint32_t),
+                  stream);
+    CheckHip(hipGetLastError(), "counts copy launch");
+    CheckHip(hipEventRecord(ready, stream), "counts record");
+    CheckHip(hipEventSynchronize(ready), "counts wait");
+    if (!std::equal(expected_counts.begin(), expected_counts.end(),
+                    host_counts) ||
+        host_counts[kExperts] != 0xDEADBEEFU)
+      throw std::runtime_error("compute count download is stale or corrupt");
+    std::vector<std::int32_t> expected_tiles;
+    for (std::uint32_t e = 0; e < kExperts; ++e)
+      for (std::uint32_t j = 0;
+           j < (expected_counts[e] + tile_rows - 1) / tile_rows; ++j)
+        expected_tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+    std::copy(expected_tiles.begin(), expected_tiles.end(), host_tiles);
+    std::fill_n(echo, capacity, guard);
+    const auto bytes = expected_tiles.size() * sizeof(std::int32_t);
+    q::CopyMapped(host_tiles, device_tiles, bytes, stream);
+    q::CopyMapped(device_tiles, echo, bytes, stream);
+    CheckHip(hipGetLastError(), "tiles copy launch");
+    CheckHip(hipEventRecord(ready, stream), "tiles record");
+    CheckHip(hipEventSynchronize(ready), "tiles wait");
+    if (!std::equal(expected_tiles.begin(), expected_tiles.end(), echo) ||
+        !std::all_of(echo + expected_tiles.size(), echo + capacity,
+                     [](auto value) { return value == guard; }))
+      throw std::runtime_error("compute tile map round trip is corrupt");
+  }
+  CheckHip(hipEventDestroy(ready), "event destroy");
+  CheckHip(hipStreamDestroy(stream), "stream destroy");
+  CheckHip(hipFree(device_ids), "ids free");
+  CheckHip(hipFree(device_counts), "counts free");
+  CheckHip(hipFree(device_tiles), "tiles free");
+  CheckHip(hipHostFree(host_counts), "pinned counts free");
+  CheckHip(hipHostFree(host_tiles), "pinned tiles free");
+  CheckHip(hipHostFree(echo), "pinned echo free");
+}
+
 // Check the router independently of the assignment-map builder: softmax,
 // selection without replacement, lowest-index ties, and renormalization.
 void CheckRouter(int tokens, int experts, int used, int pattern) {
@@ -302,6 +376,7 @@ int main() {
     std::cout << "Router softmax, ties, guards and replay: passed\n";
     bool ok = true;
     for (int n_tokens : {37, 512, 2048}) {
+      CheckRoutingTransfers(n_tokens);
       const auto ids = MakeIds(n_tokens, 0x1234ABCDU + n_tokens);
       // Gate/up: [n_tokens][kUsed] ids, one activation row per token.
       const Maps pair_ref = Reference(ids, n_tokens, kUsed, kUsed, 1);

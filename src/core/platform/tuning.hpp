@@ -1,7 +1,7 @@
 #ifndef GUFO_CORE_PLATFORM_TUNING_HPP_
 #define GUFO_CORE_PLATFORM_TUNING_HPP_
 
-// Behaviour changes validated on Windows only.
+// Windows-specific behaviour changes; qualification is in docs/WINDOWS.md.
 //
 // Each switch is on by default on Windows and off elsewhere, so a Linux build
 // runs the code it ran before the Windows port. The decode switches change
@@ -23,9 +23,10 @@
 namespace gufo::platform {
 
 struct Tuning {
-  /// Qwen3.8-Flash-Next decode (all bit-identical outputs):
+  /// Qwen3.8-Flash-Next decode and MoE routing control transfers:
   /// Small host<->device and device<->device copies as kernels instead of
   /// hipMemcpyAsync (a copy-engine hand-off per graph node on Windows).
+  /// Decode is qualified; the routing-stall mitigation awaits GPU validation.
   bool copy_kernels;
   /// Decode-sized passes wait on a completion flag in coherent pinned memory
   /// instead of hipStreamSynchronize (~0.4 ms sooner after a large graph).

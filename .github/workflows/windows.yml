@@ -111,6 +111,12 @@ jobs:
           & .\tools\windows\package.ps1 -Version "$version-$($env:GITHUB_SHA.Substring(0, 7))" -Vcpkg (Join-Path $env:GITHUB_WORKSPACE 'vcpkg') -Rocm $env:GUFO_ROCM
           if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
 
+      - name: Compile focused routing GPU regression without GPU execution
+        shell: pwsh
+        run: |
+          & .\tools\windows\build.ps1 -Preset gpu-test -Target qwen38_flash_next_moe_ids_ops_test -Rocm $env:GUFO_ROCM -Vcpkg (Join-Path $env:GITHUB_WORKSPACE 'vcpkg') -Jobs 2 -KeepGoing
+          if ($LASTEXITCODE -ne 0) { throw 'Routing GPU regression build failed' }
+
       - name: Smoke-test packaged CLI
         shell: pwsh
         run: |
