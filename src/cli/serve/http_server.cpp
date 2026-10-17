@@ -1615,16 +1615,21 @@ LoadingResponder::LoadingResponder(const std::string& host, int port) {
   // Match HttpServer::start, which binds the same address after stop().
   const int yes = 1;
   const int no = 0;
-  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+#ifdef _WIN32
+  gufo::platform::SetSocketOption(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, yes);
+#else
+  gufo::platform::SetSocketOption(fd, SOL_SOCKET, SO_REUSEADDR, yes);
+#endif
   if ((addr.ss_family == AF_INET6 &&
-       ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) != 0) ||
+       gufo::platform::SetSocketOption(fd, IPPROTO_IPV6, IPV6_V6ONLY, no) !=
+           0) ||
       ::bind(fd, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0 ||
       ::listen(fd, 16) < 0) {
     const int error = errno;
     Logger::Debug("server", "event=loading_listener_unavailable host=" + host +
                                 " port=" + std::to_string(port) +
                                 " errno=" + std::to_string(error));
-    ::close(fd);
+    gufo::platform::CloseSocket(fd);
     return;
   }
   listen_fd_ = fd;
@@ -1640,7 +1645,7 @@ void LoadingResponder::stop() {
   if (thread_.joinable())
     thread_.join();
   if (listen_fd_ >= 0) {
-    ::close(listen_fd_);
+    gufo::platform::CloseSocket(listen_fd_);
     listen_fd_ = -1;
   }
 }
@@ -1678,14 +1683,15 @@ void LoadingResponder::serve() {
           ::poll(&client, 1, static_cast<int>(remaining)) <= 0)
         break;
       char buffer[2048];
-      const ssize_t received = ::recv(client_fd, buffer, sizeof(buffer), 0);
+      const ssize_t received =
+          gufo::platform::SocketRecv(client_fd, buffer, sizeof(buffer), 0);
       if (received <= 0)
         break;
       head.append(buffer, static_cast<std::size_t>(received));
     }
     (void)SendAll(client_fd, reply);
     ::shutdown(client_fd, SHUT_WR);
-    ::close(client_fd);
+    gufo::platform::CloseConnection(client_fd);
   }
 }
 

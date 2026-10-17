@@ -2398,8 +2398,8 @@ void TestLoadingResponder() {
   loading.stop();
   assert(std::chrono::steady_clock::now() - started < std::chrono::seconds(2));
   assert(!loading.listening());
-  ::close(idle);
-  ::close(idle_during_stop);
+  gufo::platform::CloseSocket(idle);
+  gufo::platform::CloseSocket(idle_during_stop);
 
   // Handoff: the real server binds the same address and answers health.
   HttpServer server("127.0.0.1", port, nullptr);
