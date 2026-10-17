@@ -2505,13 +2505,11 @@ public:
         throw std::invalid_argument("insufficient component backing budget");
       const auto& allocation = plan.front();
       // Pages commit as captures need them. A payload cannot span segments,
-      // so the edge of each one strands space a ~140 MB private state cannot
-      // use; equal segments of about 1 GiB, and at least two private states,
-      // keep that small. A step costs about 200 ms of page faults and pinning
-      // (more when the host must reclaim page cache), so it runs ahead on a
-      // background thread; only a capture that outruns it grows on its own
-      // thread. Growth stops early when the host would keep less than its
-      // reserve.
+      // so equal segments of about 1 GiB bound stranded edge space and fit at
+      // least two payloads of the largest component. Completed append rows
+      // prepare more backing; private and tail copies commit only when needed.
+      // Pinning ahead after a final private copy can delay decoder launches.
+      // Growth stops when the host keeps less than its reserve.
       std::size_t largest = 0;
       for (const auto& [id, bytes] : backing->component_classes)
         largest = std::max(largest, bytes);
@@ -2568,9 +2566,15 @@ public:
                 limited->refused = now;
                 return false;
               }});
-      // The first capture would otherwise commit the first segment on the
-      // request path (seconds while the host reclaims page cache).
-      backing->pool->GrowAhead();
+      // Prepare a bounded reserve before readiness. The first shared-prefix
+      // capture needs more than one segment; preparing both avoids moving
+      // registration onto that request's capture or decode path.
+      backing->pool->GrowAhead(2);
+      backing->pool->WaitForGrowth();
+    };
+    result->prepare_prefill = [backing] { backing->pool->GrowAhead(2); };
+    result->can_capture = [backing](auto payloads) {
+      return backing->pool->CanFit(payloads);
     };
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
@@ -2601,10 +2605,11 @@ public:
                                    .count()));
       if (!block)
         throw cache::ResourceExhausted();
-      // Commit the next segment off the capturing thread, which otherwise
-      // stalls this and every peer request for the allocation (up to seconds
-      // while the host reclaims page cache).
-      backing->pool->GrowAhead();
+      // Completed append rows prepare backing for subsequent prefill/guard
+      // work. Final private-state and partial-tail copies must not start
+      // speculative pinning that delays the next decode step.
+      if (request.category == cache::ResourceCategory::kBackingAssigned)
+        backing->pool->GrowAhead();
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
       return ComponentCaptureBuffer{
           owner->Bytes(),

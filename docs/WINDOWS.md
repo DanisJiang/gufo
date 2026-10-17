@@ -229,10 +229,15 @@ carve-out works, but the load takes ~2 minutes and decode is slower.
 
 ## Test status
 
-- This fork's `main` includes upstream through `43ad9a5` (October 14,
-  2026), including advancing thinking-prompt checkpoints and the Flash-Next
-  component cache. Windows keeps its WDDM budget, device allocations,
+- This fork's `main` includes the official `v0.16.0` release (`b1c46d6`,
+  October 16, 2026): long-context checkpoint optimizations, functional cache
+  fixes, request-local MTP draft vocabularies and health probes during loading.
+  The Windows upstream's latest release remains `windows-2026-10-03`
+  (`2eb0778`), already included here. Windows keeps its WDDM budget, device allocations,
   hot-first weight placement, completion flags and alternating decode streams.
+- Flash-Next's default draft policy uses the new request-local vocabulary.
+  Explicit `--mtp-draft-vocab latin` keeps the Windows port's fixed Latin
+  proposal head instead; verification always uses the full target head.
 - [Windows build](../.github/workflows/windows.yml) checks native cache/server
   CPU contracts, compiles the production gfx1151 binary and uploads a bundled
   zip. It needs no model files or GPU. It runs on pushes to `main`

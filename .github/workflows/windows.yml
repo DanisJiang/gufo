@@ -93,13 +93,13 @@ jobs:
           $vcpkg = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
           & .\tools\windows\build.ps1 -Preset cpu-test -Target gufo -Rocm $env:GUFO_ROCM -Vcpkg $vcpkg -Jobs 2 -KeepGoing
           if ($LASTEXITCODE -ne 0) { throw 'CPU CLI build failed' }
-          cmake --build build/cpu-test --parallel 2 --target cache_adapter_lifecycle_test cache_checkpoint_test cache_prefix_index_test cache_retention_test cache_streaming_test cache_disk_portable_test component_text_cache_test text_model_runner_test continuation_disk_store_test text_generation_scheduler_test openai_chat_test http_server_test audio_websocket_test qwen_chat_template_test platform_tuning_test json_constraint_test -- -k 0
+          cmake --build build/cpu-test --parallel 2 --target cache_adapter_test cache_ledger_test cache_slot_test cache_idle_spill_test qwen38_flash_next_draft_vocab_test qwen38_flash_next_prompt_lookup_test cache_adapter_lifecycle_test cache_checkpoint_test cache_prefix_index_test cache_retention_test cache_streaming_test cache_disk_portable_test component_text_cache_test text_model_runner_test continuation_disk_store_test text_generation_scheduler_test openai_chat_test http_server_test audio_websocket_test qwen_chat_template_test platform_tuning_test json_constraint_test -- -k 0
           if ($LASTEXITCODE -ne 0) { throw 'CPU contract build failed' }
 
       - name: Run cache and server contracts
         shell: pwsh
         run: |
-          ctest --test-dir build/cpu-test --output-on-failure --timeout 60 -R '^(cache_adapter_lifecycle_test|cache_checkpoint_test|cache_prefix_index_test|cache_retention_test|cache_streaming_test|cache_disk_portable_test|component_text_cache_test|text_model_runner_test|continuation_disk_store_test|text_generation_scheduler_test|openai_chat_test|http_server_test|audio_websocket_test|qwen_chat_template_test|platform_tuning_test|json_constraint_test)$'
+          ctest --test-dir build/cpu-test --output-on-failure --timeout 60 -R '^(cache_adapter_test|cache_ledger_test|cache_slot_test|cache_idle_spill_test|qwen38_flash_next\.draft_vocab|qwen38_flash_next\.prompt_lookup|cache_adapter_lifecycle_test|cache_checkpoint_test|cache_prefix_index_test|cache_retention_test|cache_streaming_test|cache_disk_portable_test|component_text_cache_test|text_model_runner_test|continuation_disk_store_test|text_generation_scheduler_test|openai_chat_test|http_server_test|audio_websocket_test|qwen_chat_template_test|platform_tuning_test|json_constraint_test)$'
           if ($LASTEXITCODE -ne 0) { throw 'Windows CPU contracts failed' }
 
       - name: Build production gfx1151 binary

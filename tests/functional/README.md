@@ -81,6 +81,21 @@ python3 -m unittest discover -s tests/functional -p test_report.py
 ```
 
 
+The startup-loading runner polls health, readiness and generation from process
+start. Every answer during the load must be 503 `Loading model`, `/health`
+included, and the real server must answer all three after the listener handoff:
+
+```sh
+nix develop -c python3 tests/functional/startup_loading.py \
+  --output /tmp/startup-loading -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --cache-disk /tmp/startup-loading-disk
+```
+
+It fails if no loading answer was observed, so an instant load is not a pass.
+`observations.json` keeps every probe with its time; this check stays outside
+hosted model CI and `--suite all`.
+
 Device-loss process tests use a separate opt-in runner because each lost-device
 case must terminate its server. Build its CMake-owned preload helper, then run
 against a production binary and one explicitly selected model/mode:
@@ -335,10 +350,16 @@ Cache checks use real assistant replies and run cold controls after the warm
 history, so the controls cannot hide a missed checkpoint. `cache-edits` checks
 latest-message edits, shortened tool results and rewinds. `cache-growth` checks
 omitted, preserved and explicitly discarded reasoning, plus thinking off.
-Unchanged retries in `cache-growth` and `cache-depth` must prefill nothing,
+Unchanged retries in `cache-growth`, `cache-depth`, reasoning-separator,
+tool-history, schema edges, state edges, progress and metrics must prefill nothing,
 unless the runner's server log shows that memory pressure refused the retry
 copy; the retry may then prefill only the assistant opening after the stable
-boundary.
+boundary. In agent histories the mutable suffix includes the final user turn;
+`tool-history` bounds it with an independent count-tokens request rather than
+extra slack. Generic capture failures do not qualify for this exception.
+Component disk-spacing checks correlate drained publication logs with the
+checkpoint IDs captured by their own requests, excluding delayed writes from
+earlier suites even when their token counts match.
 `cache-rotation` visits four conversations and eight small side requests; use
 `--sessions 1` to verify retention is independent of execution slots. It also
 checks the startup RAM cap; byte/record pressure is covered by CPU tests.
