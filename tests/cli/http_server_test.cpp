@@ -2289,7 +2289,7 @@ int FreePort(const std::string& host = "127.0.0.1") {
   assert(::bind(fd, reinterpret_cast<const sockaddr*>(&address), length) == 0);
   assert(::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) ==
          0);
-  ::close(fd);
+  gufo::platform::CloseSocket(fd);
   return ntohs(address.ss_family == AF_INET6 ? ipv6->sin6_port
                                              : ipv4->sin_port);
 }
@@ -2311,11 +2311,10 @@ int ConnectTo(const std::string& host, int port) {
   }
   const int fd = ::socket(address.ss_family, SOCK_STREAM, 0);
   assert(fd >= 0);
-  const timeval timeout{3, 0};
-  assert(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ==
-         0);
+  assert(gufo::platform::SetSocketTimeout(fd, SO_RCVTIMEO,
+                                          std::chrono::seconds(3)) == 0);
   if (::connect(fd, reinterpret_cast<const sockaddr*>(&address), length) != 0) {
-    ::close(fd);
+    gufo::platform::CloseSocket(fd);
     return -1;
   }
   return fd;
@@ -2329,19 +2328,20 @@ std::string SendParts(const std::string& host, int port,
   for (std::size_t index = 0; index < parts.size(); ++index) {
     if (index > 0)
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    assert(::send(fd, parts[index].data(), parts[index].size(), MSG_NOSIGNAL) ==
+    assert(gufo::platform::SocketSend(fd, parts[index].data(),
+                                      parts[index].size(), MSG_NOSIGNAL) ==
            static_cast<ssize_t>(parts[index].size()));
   }
   std::string response;
   char buffer[4096];
   for (;;) {
-    const auto count = ::read(fd, buffer, sizeof(buffer));
+    const auto count = gufo::platform::SocketRead(fd, buffer, sizeof(buffer));
     assert(count >= 0);
     if (count == 0)
       break;
     response.append(buffer, static_cast<std::size_t>(count));
   }
-  ::close(fd);
+  gufo::platform::CloseSocket(fd);
   return response;
 }
 
