@@ -23,6 +23,7 @@
 #include <thread>
 #include <utility>
 
+#include "src/cache/slot.hpp"
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
@@ -130,6 +131,7 @@ struct ScheduledRequest {
   bool backpressure_logged{false};
   // Only the scheduler worker changes this, from admission through cleanup.
   bool counted_processing{false};
+  std::atomic<bool> waiting_context{false};
   // Admission waits at most once for a resident request to publish the
   // prompt prefix both share. Only the scheduler thread touches these.
   std::shared_ptr<ScheduledRequest> prefix_leader;
@@ -143,8 +145,8 @@ struct ScheduledRequest {
   bool publication_waiting{false};
   TextPendingPublication publication;
   detail::PublicationWaitEstimate::Milliseconds publication_wait_limit{};
-  // The held `/slots` session while counted_processing is set. Only the
-  // scheduler worker changes it.
+  // The held `/slots` session during preparation, execution or a context-pool
+  // wait. Only the scheduler worker changes it.
   std::size_t session{kNoSession};
   // Copies of result counters for `/slots`, which reads them from another
   // thread while the scheduler worker updates `result`.
@@ -221,13 +223,14 @@ void PublishTerminal(const std::shared_ptr<ScheduledRequest>& request,
     }
     request->failure = std::move(failure);
     request->terminal = true;
+    if (request->session != kNoSession) {
+      const std::lock_guard<std::mutex> sessions_lock(request->sessions->mutex);
+      request->sessions->requests[std::exchange(request->session, kNoSession)]
+          .reset();
+    }
+    if (request->waiting_context.exchange(false))
+      detail::RequestsDeferred().fetch_sub(1, std::memory_order_relaxed);
     if (std::exchange(request->counted_processing, false)) {
-      if (request->session != kNoSession) {
-        const std::lock_guard<std::mutex> sessions_lock(
-            request->sessions->mutex);
-        request->sessions->requests[std::exchange(request->session, kNoSession)]
-            .reset();
-      }
       detail::RequestsProcessing().fetch_sub(1, std::memory_order_relaxed);
     }
     request->phase.store(TextRequestPhase::kTerminal,
@@ -735,7 +738,8 @@ struct TextGenerationScheduler::Impl {
       // Identity, prompt size and limit are fixed before admission.
       const std::size_t generated =
           request->live_generated_tokens.load(std::memory_order_relaxed);
-      state.processing = true;
+      state.processing =
+          !request->waiting_context.load(std::memory_order_relaxed);
       state.request_id = request->id;
       state.prompt_tokens = request->result.prompt_tokens;
       state.cached_prompt_tokens =
@@ -1216,20 +1220,31 @@ struct TextGenerationScheduler::Impl {
 
         const std::weak_ptr<ScheduledRequest> weak_request = request;
         request->runner_request = runner_pool->Acquire(
-            std::move(request->prompt), request->sampling,
+            runner_pool->runner().ContextPoolTokens()
+                ? request->prompt
+                : std::move(request->prompt),
+            request->sampling,
             [weak_request, stop_token] {
               const auto request = weak_request.lock();
               return stop_token.stop_requested() || request == nullptr ||
                      CancellationRequested(request) ||
                      DeadlineExceeded(request);
             },
-            std::move(request->prompt_context), request->cache_prompt,
-            request->cache_prefix_tokens, request->stop_at_eos);
+            request->prompt_context, request->cache_prompt,
+            request->cache_prefix_tokens, request->stop_at_eos,
+            runner_pool->runner().ContextPoolTokens()
+                ? request->prompt.size() + request->token_limit
+                : 0);
         // Each admission may restore or capture a checkpoint of its own.
         progress.fetch_add(1, std::memory_order_relaxed);
         if (!request->runner_request) {
           CompleteCancelled(request);
           continue;
+        }
+        if (request->waiting_context.exchange(false)) {
+          detail::RequestsDeferred().fetch_sub(1, std::memory_order_relaxed);
+          detail::RequestsProcessing().fetch_add(1, std::memory_order_relaxed);
+          request->counted_processing = true;
         }
 
         request->result.component_cache =
@@ -1279,6 +1294,21 @@ struct TextGenerationScheduler::Impl {
           }
           prefilling.insert(next, std::move(request));
         }
+      } catch (const cache::SlotBusy&) {
+        if (!runner_pool->runner().ContextPoolTokens()) {
+          CompleteFailure(request, std::current_exception());
+          continue;
+        }
+        // No runner state is owned yet. Preserve the prompt, cancellation
+        // and deadline, and retry admission after resident work progresses.
+        if (!request->waiting_context.exchange(true)) {
+          if (std::exchange(request->counted_processing, false))
+            detail::RequestsProcessing().fetch_sub(1,
+                                                   std::memory_order_relaxed);
+          detail::RequestsDeferred().fetch_add(1, std::memory_order_relaxed);
+        }
+        waiting.push_front(std::move(request));
+        return;
       } catch (...) {
         CompleteFailure(request, std::current_exception());
       }

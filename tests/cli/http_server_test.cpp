@@ -98,6 +98,13 @@ public:
   bool supports_images() const override { return image_support.load(); }
   std::atomic<bool> image_support{false};
   std::uint32_t max_context() const override { return 65536; }
+  std::size_t context_pool_tokens() const override {
+    return pool_capacity.load();
+  }
+  std::size_t context_pool_reserved_tokens() const override {
+    return pool_reserved.load();
+  }
+  std::atomic<std::size_t> pool_capacity{0}, pool_reserved{0};
   std::vector<SessionState> session_states() const override { return sessions; }
   std::vector<SessionState> sessions;
   std::string model_path() const override { return served_path; }
@@ -904,6 +911,7 @@ void TestLlamaProps() {
   assert(!bare.contains("model_path"));
   assert(!bare.contains("build_info"));
   assert(!bare.contains("total_slots"));
+  assert(!bare.contains("context_pool_tokens"));
   const auto* generation = bare.find("default_generation_settings");
   assert(generation != nullptr && generation->member_size("n_ctx") == 65536);
   const auto* params = generation->find("params");
@@ -915,12 +923,16 @@ void TestLlamaProps() {
   server.backend->served_path = "/models/model-00001-of-00002.gguf";
   server.backend->served_build = "0.2.0 (abc1234)";
   server.backend->sessions.resize(2);
+  server.backend->pool_capacity = 786432;
+  server.backend->pool_reserved = 12345;
   server.backend->image_support = true;
   server.backend->defaults.max_tokens = 512;
   const auto full = props("/props");
   assert(full.member_str("model_path") == "/models/model-00001-of-00002.gguf");
   assert(full.member_str("build_info") == "0.2.0 (abc1234)");
   assert(full.member_size("total_slots") == 2);
+  assert(full.member_size("context_pool_tokens") == 786432);
+  assert(full.member_size("context_pool_reserved_tokens") == 12345);
   assert(full.find("default_generation_settings")
              ->find("params")
              ->member_size("n_predict") == 512);
@@ -1032,6 +1044,13 @@ void TestLlamaSlotsAndMetrics() {
            std::string::npos);
   }
   assert(metrics.find("# TYPE llamacpp:kv_cache_usage_ratio gauge\n") !=
+         std::string::npos);
+  server.backend->pool_capacity = 786432;
+  server.backend->pool_reserved = 12345;
+  const auto pooled = get("/metrics");
+  assert(pooled.find("gufo_context_pool_capacity_tokens 786432\n") !=
+         std::string::npos);
+  assert(pooled.find("gufo_context_pool_reserved_tokens 12345\n") !=
          std::string::npos);
 }
 

@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -22,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/context_arena.hpp"
+#include "src/core/context_pool.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
@@ -2519,6 +2523,109 @@ void TestServerInstructionsAreFraming() {
 }  // namespace
 
 int main() {
+  {
+    // Exercise actual relocation ordering, not just aggregate token counts.
+    // Eight independent contexts share one fixed backing vector. Random
+    // release/growth histories force both left and right overlapping moves.
+    gufo::core::ContextArena arena(257);
+    std::vector<std::size_t> ids;
+    for (std::size_t i = 0; i < 8; ++i)
+      ids.push_back(arena.Register());
+    std::vector<std::uint32_t> backing(arena.capacity(), 0);
+    std::uint64_t seed = 713;
+    std::size_t left_moves = 0, right_moves = 0, refused = 0;
+    for (std::size_t iteration = 0; iteration < 10000; ++iteration) {
+      seed = seed * 6364136223846793005ULL + 1;
+      const auto id = ids[(seed >> 32) % ids.size()];
+      const auto old = arena.Get(id);
+      if ((seed >> 48) % 4 == 0) {
+        arena.Release(id);
+      } else {
+        const auto size = old.size + 1 + (seed >> 40) % 80;
+        const auto before = arena.used();
+        auto plan = arena.Prepare(id, size);
+        if (!plan) {
+          ++refused;
+          Expect(arena.used() == before && arena.Get(id) == old,
+                 "a refused physical layout leaves the arena unchanged");
+        } else {
+          for (const auto& move : plan->moves) {
+            ++(move.to < move.from ? left_moves : right_moves);
+            auto* data = reinterpret_cast<std::byte*>(backing.data());
+            std::array<std::byte, 16> scratch;
+            gufo::core::ContextArena::CopyChunks(
+                move.from * sizeof(backing.front()),
+                move.to * sizeof(backing.front()),
+                move.size * sizeof(backing.front()), scratch.size(),
+                [&](std::size_t from, std::size_t to, std::size_t count) {
+                  std::memcpy(scratch.data(), data + from, count);
+                  std::memcpy(data + to, scratch.data(), count);
+                });
+          }
+          arena.Commit(std::move(*plan));
+          const auto now = arena.Get(id);
+          for (std::size_t i = old.size; i < now.size; ++i)
+            backing[now.offset + i] =
+                static_cast<std::uint32_t>((id << 16) | i);
+        }
+      }
+      std::vector<bool> occupied(arena.capacity(), false);
+      std::size_t used = 0;
+      for (auto owner : ids) {
+        const auto range = arena.Get(owner);
+        Expect(range.offset + range.size <= arena.capacity(),
+               "every context stays inside the fixed allocation");
+        for (std::size_t i = 0; i < range.size; ++i) {
+          const auto address = range.offset + i;
+          Expect(!occupied[address], "shared context ranges never overlap");
+          occupied[address] = true;
+          Expect(backing[address] == ((owner << 16) | i),
+                 "compaction preserves every session's existing rows");
+        }
+        used += range.size;
+      }
+      Expect(used == arena.used(), "physical range accounting is exact");
+    }
+    Expect(left_moves && right_moves && refused,
+           "exercise both compaction directions and full-pool refusal");
+    for (auto id : ids)
+      arena.Unregister(id);
+    Expect(arena.used() == 0, "destroying sessions returns their ranges");
+  }
+  {
+    auto pool = std::make_shared<gufo::core::ContextPool>(100);
+    gufo::core::ContextPool::Reservation reservation(pool);
+    Expect(reservation.Resize(80), "admit a context envelope");
+    Expect(pool->used() == 80, "logical capacity is charged");
+    Expect(reservation.Resize(100), "grow an admitted envelope");
+    Expect(pool->used() == 100, "growth charges only the additional tokens");
+    Expect(!reservation.Resize(101), "refuse an envelope beyond capacity");
+    Expect(pool->used() == 100, "refusal preserves the previous envelope");
+    Expect(reservation.Resize(80), "return unused logical capacity");
+    Expect(pool->used() == 80, "shrink updates the logical ledger");
+    Expect(reservation.Resize(0), "return the envelope");
+    Expect(pool->used() == 0, "release returns all logical capacity");
+  }
+  // Capacity and logical concurrency are independent, not a fixed 8-slot mode.
+  for (const std::size_t sessions : {4, 6, 8}) {
+    auto capacity = std::make_shared<gufo::core::ContextPool>(3 * 262144);
+    std::vector<std::unique_ptr<gufo::core::ContextPool::Reservation>> leases;
+    const auto share = capacity->capacity() / sessions;
+    for (std::size_t i = 0; i < sessions; ++i) {
+      auto lease =
+          std::make_unique<gufo::core::ContextPool::Reservation>(capacity);
+      Expect(lease->Resize(share), "all configured sessions share one pool");
+      leases.push_back(std::move(lease));
+    }
+    const auto before = capacity->used();
+    Expect(!leases.front()->Resize(share + capacity->capacity()),
+           "oversized growth is refused atomically");
+    Expect(capacity->used() == before, "refusal does not leak a reservation");
+    leases.pop_back();
+    Expect(leases.front()->Resize(2 * share), "released capacity is reusable");
+    leases.clear();
+    Expect(capacity->used() == 0, "destruction returns all context capacity");
+  }
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();

@@ -297,6 +297,10 @@ public:
   /// Maximum tokens accepted by the loaded model under the configured context.
   /// Zero when no text model is loaded.
   [[nodiscard]] virtual std::uint32_t max_context() const { return 0; }
+  [[nodiscard]] virtual std::size_t context_pool_tokens() const { return 0; }
+  [[nodiscard]] virtual std::size_t context_pool_reserved_tokens() const {
+    return 0;
+  }
   /// Live execution sessions; empty when the backend has no session pool.
   [[nodiscard]] virtual std::vector<SessionState> session_states() const {
     return {};

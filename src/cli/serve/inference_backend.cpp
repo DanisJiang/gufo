@@ -26,6 +26,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
+#include "src/core/context_pool.hpp"
 #include "src/core/gguf_identity.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
@@ -2374,11 +2375,15 @@ public:
                           std::uint32_t max_context, bool use_mtp,
                           std::uint32_t max_draft_tokens,
                           std::string artifact_fingerprint = {},
-                          std::string mtp_fingerprint = {})
+                          std::string mtp_fingerprint = {},
+                          std::size_t context_pool_tokens = 0)
       : model_(std::move(model)),
         max_context_(max_context),
         use_mtp_(use_mtp),
-        max_draft_tokens_(max_draft_tokens) {
+        max_draft_tokens_(max_draft_tokens),
+        context_pool_(context_pool_tokens ? std::make_shared<core::ContextPool>(
+                                                context_pool_tokens)
+                                          : nullptr) {
     // The typed in-process API owns an immutable loaded model but need not
     // supply file fingerprints when disk caching is disabled. Its model
     // lifetime is an exact process-local identity; durable caches still
@@ -2429,6 +2434,47 @@ public:
     return std::make_unique<QwenFlashNextTextRunnerState>(
         flash.GetSession(slot), adapter, slot);
   }
+  [[nodiscard]] std::size_t ContextPoolTokens() const override {
+    return context_pool_ ? context_pool_->capacity() : 0;
+  }
+  [[nodiscard]] std::size_t ContextPoolUsedTokens() const override {
+    return context_pool_ ? context_pool_->used() : 0;
+  }
+  [[nodiscard]] bool PrepareContext(TextRunnerState& state,
+                                    std::size_t tokens) const override {
+    if (!context_pool_)
+      return true;
+    if (!tokens || tokens > max_context_)
+      throw std::length_error("invalid request context reservation");
+    const std::lock_guard lock(context_mutex_);
+    auto& claim =
+        context_reservations_[&RequireQwenFlashNextState(state).slot()];
+    if (!claim)
+      claim = std::make_unique<core::ContextPool::Reservation>(context_pool_);
+    const auto previous = claim->size();
+    if (tokens > previous && !claim->Resize(tokens))
+      return false;
+    try {
+      if (RequireQwenFlashNextState(state).session().ReserveSharedContext(
+              claim->size()))
+        return true;
+    } catch (...) {
+      (void)claim->Resize(previous);
+      throw;
+    }
+    (void)claim->Resize(previous);
+    return false;
+  }
+  void ReleaseContext(TextRunnerState& state) const override {
+    if (!context_pool_)
+      return;
+    const std::lock_guard lock(context_mutex_);
+    RequireQwenFlashNextState(state).session().ReleaseSharedContext();
+    const auto found =
+        context_reservations_.find(&RequireQwenFlashNextState(state).slot());
+    if (found != context_reservations_.end())
+      (void)found->second->Resize(0);
+  }
   void ReconcileComponentState(TextRunnerState& state,
                                std::size_t position) const override {
     RequireQwenFlashNextState(state).set_position(position);
@@ -2470,15 +2516,21 @@ public:
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
         .state_capacity_bytes = capacity,
-        .per_request_state_bytes = model_->SessionBytes(
-            use_mtp_ ? gufo::core::SessionMode::kSpeculative
-                     : gufo::core::SessionMode::kAutoregressive,
-            max_context_),
+        .per_request_state_bytes =
+            context_pool_ ? model_->PrivateSessionBytes(
+                                use_mtp_ ? core::SessionMode::kSpeculative
+                                         : core::SessionMode::kAutoregressive,
+                                max_context_)
+                          : model_->SessionBytes(
+                                use_mtp_ ? core::SessionMode::kSpeculative
+                                         : core::SessionMode::kAutoregressive,
+                                max_context_),
         // Runtime scratch is shared and already allocated at model load;
         // reserve its remaining lazy buffers once from aggregate capacity.
         .temporary_scratch_bytes = 0,
         .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .segmented_snapshot_budget = bool(context_pool_),
         .requires_device_runtime_lock = true,
     };
   }
@@ -2888,6 +2940,12 @@ private:
   std::uint32_t max_draft_tokens_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
+  // Logical admission is separate from the fixed native arena's range layout.
+  std::shared_ptr<core::ContextPool> context_pool_;
+  mutable std::mutex context_mutex_;
+  mutable std::map<cache::Slot*,
+                   std::unique_ptr<core::ContextPool::Reservation>>
+      context_reservations_;
 };
 #endif
 
@@ -3011,7 +3069,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const TextDiskCacheConfig& disk_cache_config,
                             const std::string& vision_model_path,
                             TextRunnerRamCacheOptions ram_cache_config,
-                            bool enable_yarn) {
+                            bool enable_yarn, std::size_t context_pool_tokens) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -3023,6 +3081,14 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
   const auto architecture =
       reader->GetMetadataString("general.architecture").value_or("");
+  if (context_pool_tokens && architecture != "qwen4exp") {
+    SetError(error, "--context-pool-tokens applies only to Qwen3.8-Flash-Next");
+    return false;
+  }
+  if (context_pool_tokens && !vision_model_path.empty()) {
+    SetError(error, "shared context currently supports text-only Flash-Next");
+    return false;
+  }
   if (enable_yarn && architecture != "qwen4exp") {
     SetError(error, "--enable-yarn applies only to Qwen3.8-Flash-Next");
     return false;
@@ -3156,6 +3222,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .decode_concurrency = static_cast<std::uint32_t>(
                 std::clamp<std::size_t>(session_count, 1, 8)),
             .rope_scaling = rope_scaling,
+            .context_pool_tokens = context_pool_tokens,
+            .context_pool_sessions = session_count,
         },
         &load_error);
     if (model == nullptr) {
@@ -3163,6 +3231,12 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "Failed to create Qwen3.8-Flash-Next model: " + load_error);
       return false;
     }
+    if (context_pool_tokens)
+      Logger::Info("loader",
+                   "event=context_arena_allocated capacity_tokens=" +
+                       std::to_string(context_pool_tokens) +
+                       " sessions=" + std::to_string(session_count) +
+                       " bytes=" + std::to_string(model->SharedContextBytes()));
     if (rope_scaling) {
       Logger::Info(
           "loader",
@@ -3191,7 +3265,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     return load(std::move(model), error, max_context, session_count,
                 prefill_policy, scheduler_policy, speculative_config,
-                std::move(resolved_disk_cache_config), ram_cache_config);
+                std::move(resolved_disk_cache_config), ram_cache_config,
+                context_pool_tokens);
   }
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
@@ -3235,6 +3310,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   (void)vision_model_path;
   (void)ram_cache_config;
   (void)enable_yarn;
+  (void)context_pool_tokens;
   SetError(error, "HTTP inference requires the HIP backend");
   return false;
 #endif
@@ -3478,7 +3554,8 @@ bool InferenceBackend::load(
     TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
     TextSpeculativeConfig speculative_config,
     TextDiskCacheConfig disk_cache_config,
-    TextRunnerRamCacheOptions ram_cache_config) {
+    TextRunnerRamCacheOptions ram_cache_config,
+    std::size_t context_pool_tokens) {
   if (model == nullptr) {
     SetError(error, "Qwen3.8-Flash-Next model must not be null");
     return false;
@@ -3486,6 +3563,21 @@ bool InferenceBackend::load(
   if (max_context == 0)
     max_context = model->MaxContext();
 
+  if (!context_pool_tokens)
+    context_pool_tokens = model->SharedContextTokens();
+  if (context_pool_tokens != model->SharedContextTokens()) {
+    SetError(error, "shared admission must match the loaded physical arena");
+    return false;
+  }
+  if (context_pool_tokens && context_pool_tokens < max_context) {
+    SetError(error,
+             "shared context pool must accommodate one full request context");
+    return false;
+  }
+  if (context_pool_tokens && model->VisionEncoder()) {
+    SetError(error, "shared context currently supports text-only Flash-Next");
+    return false;
+  }
   if (session_count == 0) {
     SetError(error, "HTTP session count must be at least one");
     return false;
@@ -3532,7 +3624,8 @@ bool InferenceBackend::load(
         speculative_config.backend == TextSpeculativeBackend::kMtp,
         speculative_config.max_draft_tokens,
         disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint);
+        disk_cache_config.draft_model_artifact_fingerprint,
+        context_pool_tokens);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
@@ -3612,6 +3705,23 @@ std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
                           : std::vector<SessionState>{};
 #else
   return {};
+#endif
+}
+
+std::size_t InferenceBackend::context_pool_tokens() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state ? state->scheduler->runner().ContextPoolTokens() : 0;
+#else
+  return 0;
+#endif
+}
+std::size_t InferenceBackend::context_pool_reserved_tokens() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state ? state->scheduler->runner().ContextPoolUsedTokens() : 0;
+#else
+  return 0;
 #endif
 }
 

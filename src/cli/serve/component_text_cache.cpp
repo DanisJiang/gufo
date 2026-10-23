@@ -177,6 +177,7 @@ struct ComponentTextCache::Impl {
     cache::Identity live_input;
     // Acquisition order; cold assignment replaces the oldest live frontier.
     std::uint64_t used{};
+    std::size_t context_tokens{};
     bool busy{};
   };
   std::shared_ptr<TextModelRunner> runner;
@@ -279,13 +280,15 @@ struct ComponentTextCache::Impl {
           resources->pinned_bytes ? resources->pinned_bytes() : 0;
       const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
       const auto automatic = measured + pinned / 2;
-      const auto ceiling =
+      auto ceiling =
           claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
       automatic_bytes =
           std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
       // Staging is pinned host memory too, so the host keeps its reserve
       // only if both fit under the ceiling.
       const auto staging = ledger.Limits().staging_bytes;
+      if (claim.segmented_snapshot_budget && !automatic_ram)
+        ceiling = std::max(ceiling, ram + pinned + staging);
       max_bytes = ceiling > staging ? ceiling - staging : 0;
       ram = std::min(ram, max_bytes);
       if (automatic_ram)
@@ -938,7 +941,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
     const ContinuationCache::CancellationCheck& cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse,
-    std::size_t stable, bool stop_at_eos) {
+    std::size_t stable, bool stop_at_eos, std::size_t context_tokens) {
   if (cancelled && cancelled())
     return {};
   auto input = Inputs(prompt.size(), context.get());
@@ -1056,13 +1059,30 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     }
     if (!entry)
       throw cache::SlotBusy();
+    if (const auto capacity = impl_->runner->ContextPoolTokens()) {
+      if (!context_tokens)
+        context_tokens = impl_->runner->Descriptor().max_context;
+      const auto used = impl_->runner->ContextPoolUsedTokens();
+      auto available = capacity - std::min(capacity, used);
+      for (const auto& candidate : impl_->entries)
+        if (!candidate->busy && (!live || candidate.get() != entry))
+          available +=
+              std::min(capacity - available, candidate->context_tokens);
+      const auto needed = live && context_tokens <= entry->context_tokens ? 0
+                          : live ? context_tokens - entry->context_tokens
+                                 : context_tokens;
+      // A host-only refusal must not repeatedly zero idle recurrent state or
+      // touch the GPU once per decode round while peers own the whole pool.
+      if (needed > available)
+        throw cache::SlotBusy();
+    }
     entry->busy = true;
     entry->used = ++impl_->clock;
     if (!live) {
       entry->branch = std::make_shared<const std::uint8_t>(0);
       entry->durable.reset();
     }
-    if (entry->live) {
+    if (entry->live && !live) {
       impl_->index.Erase(*entry->live);
       entry->live.reset();
       entry->live_tokens.clear();
@@ -1071,6 +1091,78 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   std::unique_ptr<Lease> lease;
   try {
     auto slot = entry->slot->Acquire(live);
+    if (impl_->runner->ContextPoolTokens()) {
+      auto state = impl_->runner->BindComponentState(*impl_->resources->adapter,
+                                                     slot.Execution());
+      if (!live) {
+        impl_->runner->ReleaseContext(*state);
+        entry->context_tokens = 0;
+      }
+      if (!context_tokens)
+        context_tokens = impl_->runner->Descriptor().max_context;
+      std::vector<Impl::Entry*> reclaimed;
+      while (!impl_->runner->PrepareContext(*state, context_tokens)) {
+        // Reclaim only idle native rows. LeasedSlot drains/preserves borrowed
+        // cache readers before reset, so retained RAM/NVMe checkpoints remain
+        // valid. Never take physical capacity from a running request.
+        Impl::Entry* victim = nullptr;
+        {
+          const std::lock_guard lock(impl_->mutex);
+          for (auto& candidate : impl_->entries)
+            if (candidate.get() != entry && !candidate->busy &&
+                candidate->context_tokens &&
+                std::ranges::find(reclaimed, candidate.get()) ==
+                    reclaimed.end() &&
+                (!victim || candidate->used < victim->used))
+              victim = candidate.get();
+          if (victim) {
+            victim->busy = true;
+            if (victim->live)
+              impl_->index.Erase(*victim->live);
+            victim->live.reset();
+            victim->live_tokens.clear();
+          }
+        }
+        if (!victim || (cancelled && cancelled())) {
+          if (victim) {
+            const std::lock_guard lock(impl_->mutex);
+            victim->busy = false;
+          }
+          // Preserve the exact native frontier on a refused live admission.
+          // The caller keeps the prompt and retries after peers release rows.
+          if (live)
+            slot.Commit();
+          throw cache::SlotBusy();
+        }
+        try {
+          auto retired = victim->slot->Acquire({});
+          auto retired_state = impl_->runner->BindComponentState(
+              *impl_->resources->adapter, retired.Execution());
+          impl_->runner->ReleaseContext(*retired_state);
+          victim->context_tokens = 0;
+          victim->history.reset();
+          victim->branch.reset();
+          victim->durable.reset();
+        } catch (...) {
+          const std::lock_guard lock(impl_->mutex);
+          victim->busy = false;
+          throw;
+        }
+        {
+          const std::lock_guard lock(impl_->mutex);
+          victim->busy = false;
+          reclaimed.push_back(victim);
+        }
+      }
+      entry->context_tokens = std::max(entry->context_tokens, context_tokens);
+    }
+    {
+      const std::lock_guard lock(impl_->mutex);
+      if (entry->live)
+        impl_->index.Erase(*entry->live);
+      entry->live.reset();
+      entry->live_tokens.clear();
+    }
     lease = std::make_unique<Lease>(std::make_unique<Lease::Impl>(
         impl_.get(), entry, std::move(slot), prompt, input, stable));
     auto& request = *lease->impl_;
@@ -1320,11 +1412,19 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
                      " selected_tokens=" + std::to_string(request.cached) +
                      " restored_bytes=" + std::to_string(request.restored));
     return lease;
+  } catch (const cache::SlotBusy&) {
+    const std::lock_guard lock(impl_->mutex);
+    entry->busy = false;
+    throw;
   } catch (...) {
     if (lease)
       lease->Invalidate();
     else {
       const std::lock_guard lock(impl_->mutex);
+      if (entry->live)
+        impl_->index.Erase(*entry->live);
+      entry->live.reset();
+      entry->live_tokens.clear();
       entry->busy = false;
     }
     throw;

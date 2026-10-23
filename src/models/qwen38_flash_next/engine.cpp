@@ -119,6 +119,11 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     AssignError(error_msg, e.what());
     return nullptr;
   }
+  if (options.context_pool_tokens && m->vision_) {
+    AssignError(error_msg,
+                "shared context currently supports text-only Flash-Next");
+    return nullptr;
+  }
   m->tokenizer_ =
       tokenization::QwenTokenizer::CreateFromGguf(*m->reader_, error_msg);
   if (!m->tokenizer_) {
@@ -176,6 +181,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
           : 1;
   exec.max_speculative = exec.max_logit_rows;
   exec.max_context = options.max_context;
+  exec.context_pool_tokens = options.context_pool_tokens;
+  exec.context_pool_sessions = options.context_pool_sessions;
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
   if (!m->executor_) {
@@ -287,6 +294,20 @@ std::size_t Model::SessionBytes(core::SessionMode mode,
 
 std::size_t Model::DeferredScratchBytes() const {
   return executor_->DeferredScratchBytes();
+}
+
+std::size_t Model::SharedContextBytes() const noexcept {
+  return executor_->SharedContextBytes();
+}
+std::size_t Model::PrivateSessionBytes(core::SessionMode mode,
+                                       std::uint32_t context) const {
+  return SessionBytes(mode, context) - executor_->AppendBytes(mode, context);
+}
+bool Session::ReserveSharedContext(std::size_t tokens) {
+  return session_->ReserveSharedContext(tokens);
+}
+void Session::ReleaseSharedContext() {
+  session_->ReleaseSharedContext();
 }
 
 std::size_t Session::AllocatedBytes() const noexcept {

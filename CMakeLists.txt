@@ -524,6 +524,7 @@ if (BUILD_TESTING)
 
   add_executable(component_text_cache_test
     tests/cli/component_text_cache_test.cpp
+    src/cli/serve/text_generation_scheduler.cpp
     src/cli/serve/component_text_cache.cpp
     src/cli/serve/continuation_cache.cpp
     src/cli/serve/continuation_disk_store.cpp

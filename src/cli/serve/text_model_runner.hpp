@@ -169,6 +169,9 @@ struct TextRunnerResourceClaim {
   /// Most an explicit RAM-cache limit may claim. Missing means the automatic
   /// retained_snapshot_capacity_bytes is also the ceiling.
   std::optional<std::size_t> retained_snapshot_ceiling_bytes;
+  /// An explicit cache budget limits logical retained payloads. The provider
+  /// commits bounded segments under its existing physical host/heap guards.
+  bool segmented_snapshot_budget{false};
   bool requires_device_runtime_lock{false};
 };
 
@@ -387,6 +390,16 @@ public:
       const = 0;
 
   [[nodiscard]] virtual bool UsesComponentCache() const { return false; }
+  /// Zero keeps fixed per-session allocation. PrepareContext is called before
+  /// restoration/execution; false is temporary admission pressure, not error.
+  [[nodiscard]] virtual std::size_t ContextPoolTokens() const { return 0; }
+  [[nodiscard]] virtual std::size_t ContextPoolUsedTokens() const { return 0; }
+  [[nodiscard]] virtual bool PrepareContext(TextRunnerState&,
+                                            std::size_t) const {
+    return true;
+  }
+  /// Called only after guarded cold acquisition has invalidated native rows.
+  virtual void ReleaseContext(TextRunnerState&) const {}
   [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const;
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
@@ -646,7 +659,7 @@ public:
       const CancellationCheck& is_cancelled = {},
       std::shared_ptr<const TextPromptContext> context = {},
       bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
-      bool stop_at_eos = true);
+      bool stop_at_eos = true, std::size_t context_tokens = 0);
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
   /// Longest RAM-retained prefix of prompt that Acquire could reuse, without

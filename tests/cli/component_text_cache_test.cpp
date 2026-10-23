@@ -13,10 +13,14 @@
 #include <semaphore>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 #include "src/cache/retention.hpp"
+#include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
+#include "src/core/context_pool.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
 using namespace gufo;
@@ -32,6 +36,38 @@ struct State final : TextRunnerState {
 };
 class Runner : public TextModelRunner {
 public:
+  std::shared_ptr<core::ContextPool> context_pool;
+  mutable std::atomic<std::size_t> context_refusals{0};
+  mutable std::atomic<bool> hold_decode{false};
+  mutable std::binary_semaphore decode_entered{0}, allow_decode{0};
+  mutable std::atomic<bool> hold_prefill{false};
+  mutable std::binary_semaphore prefill_entered{0}, allow_prefill{0};
+  mutable std::unordered_map<const cache::Slot*,
+                             std::unique_ptr<core::ContextPool::Reservation>>
+      context_claims;
+  std::size_t ContextPoolTokens() const override {
+    return context_pool ? context_pool->capacity() : 0;
+  }
+  std::size_t ContextPoolUsedTokens() const override {
+    return context_pool ? context_pool->used() : 0;
+  }
+  bool PrepareContext(TextRunnerState& state,
+                      std::size_t tokens) const override {
+    if (!context_pool)
+      return true;
+    auto& claim = context_claims[&dynamic_cast<State&>(state).slot];
+    if (!claim)
+      claim = std::make_unique<core::ContextPool::Reservation>(context_pool);
+    if (tokens <= claim->size() || claim->Resize(tokens))
+      return true;
+    ++context_refusals;
+    return false;
+  }
+  void ReleaseContext(TextRunnerState& state) const override {
+    auto& s = dynamic_cast<State&>(state);
+    assert(s.adapter.Positions(s.slot).front().valid_rows == 0);
+    context_claims.erase(&s.slot);
+  }
   mutable FakeAdapter* adapter{};
   mutable std::size_t captures{};
   bool defer_idle{};
@@ -165,6 +201,10 @@ public:
                           std::span<const TextRunnerToken> prompt,
                           std::size_t offset,
                           std::size_t budget) const override {
+    if (hold_prefill.exchange(false)) {
+      prefill_entered.release();
+      allow_prefill.acquire();
+    }
     auto& s = dynamic_cast<State&>(state);
     const auto count = std::min(budget, prompt.size() - offset);
     s.adapter.Append(s.slot, prompt.subspan(offset, count),
@@ -202,6 +242,10 @@ public:
   }
   TextDecodeSelection SelectNext(TextRunnerState& state,
                                  sampling::SamplerState&) const override {
+    if (hold_decode.exchange(false)) {
+      decode_entered.release();
+      allow_decode.acquire();
+    }
     auto& s = dynamic_cast<State&>(state);
     return {.token = static_cast<TextRunnerToken>(
                 s.adapter.RecurrentHash(s.slot) % 100000),
@@ -1872,6 +1916,126 @@ void OverRamCaptureStagesPrivateStateUnderPressure(bool protect) {
 }
 }  // namespace
 int main() {
+  {
+    class BudgetRunner final : public Runner {
+    public:
+      TextRunnerResourceClaim ResourceClaim() const override {
+        auto claim = Runner::ResourceClaim();
+        claim.state_capacity_bytes = 64ULL << 30;
+        claim.temporary_scratch_bytes = 0;
+        claim.retained_snapshot_capacity_bytes = 8ULL << 30;
+        claim.retained_snapshot_ceiling_bytes = 2ULL << 30;
+        claim.segmented_snapshot_budget = true;
+        return claim;
+      }
+      std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+          cache::ResourceLedger& ledger, std::size_t ram) const override {
+        auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+        resources->commit_backing = [](std::size_t budget) {
+          assert(budget == (8ULL << 30) &&
+                 "explicit logical cache budget survives fixed KV allocation");
+        };
+        return resources;
+      }
+    };
+    auto runner = std::make_shared<BudgetRunner>();
+    runner->context_pool = std::make_shared<core::ContextPool>(4096);
+    std::ostringstream logs;
+    const auto level = Logger::Level();
+    Logger::SetLevel(LogLevel::kInfo);
+    auto* sink = std::clog.rdbuf(logs.rdbuf());
+    {
+      TextRunnerPool pool(
+          runner, 6, {},
+          TextRunnerRamCacheOptions{.capacity_bytes = 8ULL << 30});
+    }
+    std::clog.rdbuf(sink);
+    Logger::SetLevel(level);
+    assert(
+        logs.str().find("capacity_bytes=8589934592") != std::string::npos &&
+        "the configured RAM-cache budget is independent of shared KV capacity");
+  }
+  {
+    auto runner = std::make_shared<Runner>();
+    runner->context_pool = std::make_shared<core::ContextPool>(4096);
+    TextRunnerPool pool(runner, 3);
+    const std::vector<TextRunnerToken> prompt{11, 12, 13, 14};
+    auto initial = pool.Acquire(prompt, {}, {}, {}, true, 0, true, 1024);
+    Prefill(initial);
+    (void)initial.Commit();
+    auto blocker = pool.Acquire({200}, {}, {}, {}, true, 0, true, 3072);
+    const auto invalidations = runner->adapter->Invalidations();
+    for (int attempt = 0; attempt < 100; ++attempt) {
+      try {
+        auto refused = pool.Acquire(prompt, {}, {}, {}, true, 0, true, 2048);
+        assert(false && "live growth cannot steal a running envelope");
+      } catch (const cache::SlotBusy&) {
+      }
+    }
+    assert(runner->adapter->Invalidations() == invalidations);
+    auto retry = pool.Acquire(prompt, {}, {}, {}, true, 0, true, 1024);
+    assert(retry.cached_prompt_tokens() == prompt.size());
+    assert(retry.cache_restore_bytes() == 0 &&
+           "a refused admission must preserve the live frontier");
+  }
+  for (const bool cancel : {false, true}) {
+    auto runner = std::make_shared<Runner>();
+    runner->context_pool = std::make_shared<core::ContextPool>(4096);
+    runner->hold_decode = true;
+    runner->hold_prefill = true;
+    auto pool = std::make_shared<TextRunnerPool>(runner, 4);
+    TextGenerationScheduler scheduler(pool);
+    auto first =
+        scheduler.Submit(std::vector<TextRunnerToken>(4093, 10), 3, 0.0f);
+    assert(runner->prefill_entered.try_acquire_for(std::chrono::seconds(5)));
+    auto second =
+        scheduler.Submit(std::vector<TextRunnerToken>(4093, 20), 3, 0.0f);
+    runner->allow_prefill.release();
+    assert(runner->decode_entered.try_acquire_for(std::chrono::seconds(5)));
+    assert(runner->context_refusals == 0 &&
+           "pressure is checked before touching native state");
+    assert(second.phase() == TextRequestPhase::kQueued);
+    assert(detail::RequestsProcessing().load() == 1);
+    assert(detail::RequestsDeferred().load() == 1);
+    if (cancel)
+      second.Cancel();
+    runner->allow_decode.release();
+    const auto a = first.Wait();
+    const auto b = second.Wait();
+    assert(a.completion_tokens == 3 && b.completion_tokens == (cancel ? 0 : 3));
+    if (cancel)
+      assert(b.finish_reason ==
+             TextGenerationBackend::FinishReason::kCancelled);
+    assert(runner->context_pool->used() <= 4096);
+    assert(detail::RequestsProcessing().load() == 0);
+    assert(detail::RequestsDeferred().load() == 0);
+  }
+  for (const std::size_t sessions : {4, 6, 8}) {
+    auto runner = std::make_shared<Runner>();
+    runner->context_pool = std::make_shared<core::ContextPool>(4096);
+    TextRunnerPool pool(runner, sessions);
+    std::vector<TextRunnerPool::Request> active;
+    const auto share = 4096 / sessions;
+    for (std::size_t i = 0; i < sessions; ++i) {
+      active.push_back(pool.Acquire({static_cast<TextRunnerToken>(i + 1)}, {},
+                                    {}, {}, true, 0, true, share));
+      assert(active.back());
+    }
+    assert(runner->context_pool->used() == share * sessions);
+    active.clear();
+    // Idle native frontiers still occupy their old envelopes. Admission must
+    // reclaim them through guarded reset, rather than reject or oversubscribe.
+    auto large = pool.Acquire({100}, {}, {}, {}, true, 0, true, 4096);
+    assert(large && runner->context_pool->used() == 4096);
+    try {
+      auto blocked = pool.Acquire({200}, {}, {}, {}, true, 0, true, 1);
+      assert(false && "a running request must keep its reserved envelope");
+    } catch (const cache::SlotBusy&) {
+    }
+    large = {};
+    auto retry = pool.Acquire({200}, {}, {}, {}, true, 0, true, 4096);
+    assert(retry && runner->context_pool->used() == 4096);
+  }
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
   SharedPeerReusesTheCurrentStableCapture();

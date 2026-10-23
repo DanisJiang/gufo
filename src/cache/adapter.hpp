@@ -21,6 +21,9 @@ public:
   MutationGuard& operator=(const MutationGuard&) = delete;
   MutationGuard(MutationGuard&&) = delete;
   MutationGuard& operator=(MutationGuard&&) = delete;
+  // Direct adapters are caller-serialized. A leased slot overrides this to
+  // prevent peer relocation from racing its background idle-spill worker.
+  virtual bool HoldsExecutionLease() const noexcept { return true; }
   // Called synchronously on the host, before invalidating execution or queuing
   // any overwrite of [first, end). Preservation copies and reader waits, across
   // every stream, must finish before return; no device-stream ordering is

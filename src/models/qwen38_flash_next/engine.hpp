@@ -57,6 +57,9 @@ struct ModelOptions {
   /// artifact's own setting, which is always off: no GGUF metadata key sets
   /// it today.
   std::optional<RopeScaling> rope_scaling{};
+  /// One startup-allocated native KV arena, shared by these logical sessions.
+  std::size_t context_pool_tokens{0};
+  std::size_t context_pool_sessions{1};
 };
 
 class Session;
@@ -103,6 +106,12 @@ public:
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  [[nodiscard]] std::size_t SharedContextBytes() const noexcept;
+  [[nodiscard]] std::size_t SharedContextTokens() const noexcept {
+    return options_.context_pool_tokens;
+  }
+  [[nodiscard]] std::size_t PrivateSessionBytes(core::SessionMode mode,
+                                                std::uint32_t context) const;
   [[nodiscard]] const std::shared_ptr<qwen::vision::Encoder>& VisionEncoder()
       const noexcept {
     return vision_;
@@ -215,6 +224,8 @@ public:
   void SetCancellationCheck(std::function<bool()> check);
   [[nodiscard]] bool IsValid() const noexcept { return valid_; }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  [[nodiscard]] bool ReserveSharedContext(std::size_t tokens);
+  void ReleaseSharedContext();
   void ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt);
   /// A new request reusing cached context starts its own acceptance history.
   void ResetDraftPolicy();

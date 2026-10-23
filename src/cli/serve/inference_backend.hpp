@@ -84,7 +84,7 @@ public:
             const TextDiskCacheConfig& disk_cache_config = {},
             const std::string& vision_model_path = {},
             TextRunnerRamCacheOptions ram_cache_config = {},
-            bool enable_yarn = false);
+            bool enable_yarn = false, std::size_t context_pool_tokens = 0);
 
 #if defined(ENGINE_ENABLE_HIP)
   /// Installs a previously loaded model without duplicating mapped weights.
@@ -116,7 +116,8 @@ public:
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
-            TextRunnerRamCacheOptions ram_cache_config = {});
+            TextRunnerRamCacheOptions ram_cache_config = {},
+            std::size_t context_pool_tokens = 0);
 #endif
 
   /// Stable model identifier used in API responses.
@@ -128,6 +129,8 @@ public:
   [[nodiscard]] std::string build_info() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const override;
+  [[nodiscard]] std::size_t context_pool_tokens() const override;
+  [[nodiscard]] std::size_t context_pool_reserved_tokens() const override;
   [[nodiscard]] std::vector<SessionState> session_states() const override;
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;
   [[nodiscard]] InitialOutputState initial_output_state(

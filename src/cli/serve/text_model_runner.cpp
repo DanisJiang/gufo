@@ -264,6 +264,12 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
   }
 
   auto resources = runner->ResourceClaim();
+  if (runner->ContextPoolTokens() &&
+      (!runner->UsesComponentCache() ||
+       runner->ContextPoolTokens() < descriptor.max_context))
+    throw std::invalid_argument(
+        "shared context requires component cache and capacity for one full "
+        "context");
   const auto per_state_reservation = PerStateReservationBytes(resources);
   if (resources.state_capacity_bytes.has_value() &&
       per_state_reservation.has_value()) {
@@ -636,13 +642,16 @@ struct TextRunnerPool::Impl {
       const auto resources = validated.runner->ResourceClaim();
       const auto automatic =
           resources.retained_snapshot_capacity_bytes.value_or(0);
-      const auto ceiling =
+      auto ceiling =
           resources.retained_snapshot_ceiling_bytes.value_or(automatic);
       const auto requested =
           ram_cache_options.capacity_bytes
               ? ram_cache_options.capacity_bytes
               : std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
                          automatic);
+      if (resources.segmented_snapshot_budget &&
+          ram_cache_options.capacity_bytes)
+        ceiling = std::max(ceiling, requested);
       // This is an upper bound. Providers commit backing only after their
       // slots allocate and the cache observes remaining host capacity. Slots
       // allocate under the ceiling; what they pin is charged on top of this.
@@ -2036,7 +2045,8 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
-    std::size_t cache_prefix_tokens, bool stop_at_eos) {
+    std::size_t cache_prefix_tokens, bool stop_at_eos,
+    std::size_t context_tokens) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
@@ -2046,6 +2056,11 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   }
   if (cache_prefix_tokens > prompt.size())
     throw std::invalid_argument("cache prefix exceeds prompt length");
+  if (!context_tokens)
+    context_tokens = impl_->validated.descriptor.max_context;
+  if (context_tokens < prompt.size() ||
+      context_tokens > impl_->validated.descriptor.max_context)
+    throw std::length_error("request reservation exceeds model context");
 
   std::unique_lock admission(impl_->admission_mutex, std::defer_lock);
   while (!admission.try_lock_for(std::chrono::milliseconds(10))) {
@@ -2056,7 +2071,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   if (impl_->component_cache) {
     auto lease = impl_->component_cache->Acquire(
         prompt, is_cancelled, context, reuse_prompt, cache_prefix_tokens,
-        stop_at_eos);
+        stop_at_eos, context_tokens);
     if (!lease)
       return {};
     Request request(std::make_unique<Request::Impl>(

@@ -5,9 +5,11 @@
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -16,6 +18,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "src/core/context_arena.hpp"
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/session_mode.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
@@ -120,6 +123,9 @@ public:
     return mutation_epoch_;
   }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  [[nodiscard]] bool ReserveSharedContext(std::size_t tokens);
+  void ReleaseSharedContext();
+  [[nodiscard]] bool HasContextCapacity(std::size_t tokens) const noexcept;
   /// PLE rows this session has gathered, including prefetches, since creation.
   [[nodiscard]] NgramTotals NgramRowTotals() const noexcept {
     return ngram_counters_.Load();
@@ -210,6 +216,8 @@ private:
   std::unordered_set<std::uint64_t> warmed_;
   std::vector<void*> allocations_;
   std::size_t allocated_bytes_{0};
+  std::size_t shared_id_{0}, shared_offset_{0}, shared_size_{0};
+  std::size_t shared_tokens_{0};
   std::size_t rollback_bytes_{0};
   std::function<bool()> is_cancelled_;
   std::vector<float*> rollback_allocations_;
@@ -247,6 +255,8 @@ public:
     /// Largest session context. Zero selects the native context; values
     /// above it require YaRN (Config::MaxContextLength()).
     std::uint32_t max_context{0};
+    std::size_t context_pool_tokens{0};
+    std::size_t context_pool_sessions{1};
   };
 
   ~Executor();
@@ -267,6 +277,11 @@ public:
       core::SessionMode mode, std::uint32_t max_context,
       std::uint32_t rollback_depth) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  [[nodiscard]] std::size_t SharedContextBytes() const noexcept {
+    return shared_context_bytes_;
+  }
+  [[nodiscard]] std::size_t AppendBytes(core::SessionMode mode,
+                                        std::uint32_t context) const noexcept;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
   [[nodiscard]] std::unique_ptr<PrefillCheckpoint> MakePrefillCheckpoint(
@@ -591,6 +606,21 @@ private:
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
   Options options_;
+  friend class Session;
+  struct SharedRows {
+    __half *key{}, *value{}, *pooled{};
+  };
+  std::vector<SharedRows> shared_attention_;
+  SharedRows shared_mtp_;
+  std::unique_ptr<core::ContextArena> context_arena_;
+  mutable std::mutex context_mutex_;
+  mutable std::map<std::size_t, Session*> context_sessions_;
+  mutable std::atomic<bool> context_failed_{false};
+  std::size_t shared_context_bytes_{0};
+  std::uint8_t* relocation_scratch_{nullptr};
+  static constexpr std::size_t kRelocationScratchBytes = 1ULL << 20;
+  void BindSharedRange(Session& session, core::ContextArena::Range range) const;
+  void ForgetSharedContext(Session& session) const noexcept;
   [[nodiscard]] std::shared_ptr<SnapshotAllocator> GetSnapshotAllocator() const;
   mutable std::once_flag snapshot_allocator_once_;
   mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;

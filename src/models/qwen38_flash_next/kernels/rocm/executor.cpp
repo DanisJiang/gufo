@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
@@ -689,6 +690,8 @@ Session::~Session() {
     std::lock_guard lock(snapshots_->mutex);
     snapshots_->failure = std::current_exception();
   }
+  if (shared_id_)
+    owner_->ForgetSharedContext(*this);
   TrimRollback(0);
   for (auto& [key, exec] : graphs_) {
     (void)hipGraphExecDestroy(exec);
@@ -757,6 +760,157 @@ bool Session::CheckCancellation(std::string* error) const {
 
 std::size_t Session::AllocatedBytes() const noexcept {
   return allocated_bytes_ + rollback_bytes_ + vision_input_.Bytes();
+}
+
+bool Session::HasContextCapacity(std::size_t tokens) const noexcept {
+  if (tokens > max_context_)
+    return false;
+  if (!shared_id_)
+    return true;
+  if (!tokens)
+    return !owner_->context_failed_;
+  return !owner_->context_failed_ &&
+         shared_size_ >= owner_->config().compress_ratio &&
+         tokens <= shared_size_ - owner_->config().compress_ratio;
+}
+
+void Executor::BindSharedRange(Session& session,
+                               core::ContextArena::Range range) const {
+  if (session.shared_offset_ != range.offset ||
+      bool(session.shared_size_) != bool(range.size)) {
+    for (const auto& [key, graph] : session.graphs_)
+      (void)hipGraphExecDestroy(graph);
+    session.graphs_.clear();
+    session.warmed_.clear();
+  }
+  const auto& c = config();
+  const auto bind = [&](const SharedRows& rows, auto& state) {
+    state.k_cache =
+        range.size ? rows.key + range.offset * c.AttentionKvDim() : nullptr;
+    state.v_cache =
+        range.size ? rows.value + range.offset * c.AttentionKvDim() : nullptr;
+    state.block_k = range.size
+                        ? rows.pooled + (range.offset / c.compress_ratio) *
+                                            c.indexer_head_dim
+                        : nullptr;
+  };
+  for (std::uint32_t layer = 0; layer < c.num_layers; ++layer)
+    if (!c.IsLinearLayer(layer))
+      bind(shared_attention_[layer], session.attention_[layer]);
+  if (session.mtp_enabled_)
+    bind(shared_mtp_, session.mtp_);
+  session.shared_offset_ = range.offset;
+  session.shared_size_ = range.size;
+}
+
+bool Session::ReserveSharedContext(std::size_t tokens) {
+  if (!shared_id_)
+    return true;
+  if (!tokens || tokens > max_context_)
+    throw std::length_error("invalid shared context envelope");
+  const auto& c = owner_->config();
+  const auto extra = mtp_enabled_ ? owner_->options_.max_speculative : 0;
+  const auto extent = (tokens + extra + c.compress_ratio - 1) /
+                          c.compress_ratio * c.compress_ratio +
+                      c.compress_ratio;
+  const std::lock_guard lock(owner_->context_mutex_);
+  if (owner_->context_failed_)
+    throw std::runtime_error("shared context arena is unavailable");
+  std::size_t used = 0;
+  for (const auto& [id, session] : owner_->context_sessions_)
+    used += session->shared_tokens_;
+  if (tokens > shared_tokens_ &&
+      tokens - shared_tokens_ > owner_->options_.context_pool_tokens - used)
+    return false;
+  if (extent <= shared_size_) {
+    shared_tokens_ = std::max(shared_tokens_, tokens);
+    return true;
+  }
+  auto plan = owner_->context_arena_->Prepare(shared_id_, extent);
+  if (!plan)
+    return false;
+  for (const auto& move : plan->moves) {
+    const auto* session = owner_->context_sessions_.at(move.id);
+    if (session->continuation_hooks_ &&
+        !session->continuation_hooks_->CanRebase())
+      return false;
+  }
+  const auto check = [](hipError_t status) {
+    if (status != hipSuccess)
+      throw std::runtime_error(hipGetErrorString(status));
+  };
+  check(hipStreamSynchronize(owner_->stream()));
+  for (const auto& move : plan->moves) {
+    auto* session = owner_->context_sessions_.at(move.id);
+    if (session->continuation_hooks_)
+      session->continuation_hooks_->BeforeRebase();
+    session->PreserveSnapshots(0, 0);
+  }
+  bool copying = false;
+  try {
+    const auto copy = [&](void* base, std::size_t from, std::size_t to,
+                          std::size_t bytes) {
+      auto* data = static_cast<std::uint8_t*>(base);
+      core::ContextArena::CopyChunks(
+          from, to, bytes, Executor::kRelocationScratchBytes,
+          [&](std::size_t source, std::size_t target, std::size_t count) {
+            copying = true;
+            check(hipMemcpyAsync(owner_->relocation_scratch_, data + source,
+                                 count, hipMemcpyDeviceToDevice,
+                                 owner_->stream()));
+            check(hipMemcpyAsync(data + target, owner_->relocation_scratch_,
+                                 count, hipMemcpyDeviceToDevice,
+                                 owner_->stream()));
+          });
+    };
+    for (const auto& move : plan->moves) {
+      const auto rows = [&](const Executor::SharedRows& storage) {
+        const auto kv_bytes = c.AttentionKvDim() * sizeof(__half);
+        copy(storage.key, move.from * kv_bytes, move.to * kv_bytes,
+             move.size * kv_bytes);
+        copy(storage.value, move.from * kv_bytes, move.to * kv_bytes,
+             move.size * kv_bytes);
+        const auto pooled_bytes = c.indexer_head_dim * sizeof(__half);
+        copy(storage.pooled, move.from / c.compress_ratio * pooled_bytes,
+             move.to / c.compress_ratio * pooled_bytes,
+             move.size / c.compress_ratio * pooled_bytes);
+      };
+      for (std::uint32_t layer = 0; layer < c.num_layers; ++layer)
+        if (!c.IsLinearLayer(layer))
+          rows(owner_->shared_attention_[layer]);
+      if (owner_->has_mtp())
+        rows(owner_->shared_mtp_);
+    }
+    check(hipStreamSynchronize(owner_->stream()));
+    owner_->context_arena_->Commit(std::move(*plan));
+    for (const auto& [id, session] : owner_->context_sessions_)
+      owner_->BindSharedRange(*session, owner_->context_arena_->Get(id));
+    shared_tokens_ = std::max(shared_tokens_, tokens);
+  } catch (...) {
+    (void)hipStreamSynchronize(owner_->stream());
+    if (copying)
+      owner_->context_failed_ = true;
+    throw;
+  }
+  return true;
+}
+
+void Session::ReleaseSharedContext() {
+  if (!shared_id_)
+    return;
+  if (position_ || mtp_.position)
+    throw std::logic_error("release requires a guarded empty context");
+  const std::lock_guard lock(owner_->context_mutex_);
+  owner_->context_arena_->Release(shared_id_);
+  owner_->BindSharedRange(*this, {});
+  shared_tokens_ = 0;
+}
+
+void Executor::ForgetSharedContext(Session& session) const noexcept {
+  const std::lock_guard lock(context_mutex_);
+  context_arena_->Unregister(session.shared_id_);
+  context_sessions_.erase(session.shared_id_);
+  session.shared_id_ = 0;
 }
 
 PrefillCheckpoint::~PrefillCheckpoint() {
@@ -1266,6 +1420,67 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       return nullptr;
     }
   }
+  if (options.context_pool_tokens) {
+    const auto maximum = std::numeric_limits<std::size_t>::max();
+    const auto tail = e->options_.max_speculative + 2ULL * c.compress_ratio;
+    if (!options.context_pool_sessions || !c.compress_ratio ||
+        options.context_pool_tokens < options.max_context ||
+        options.context_pool_sessions >
+            (maximum - options.context_pool_tokens) / tail) {
+      AssignError(error_msg, "invalid shared context arena capacity");
+      return nullptr;
+    }
+    const auto capacity =
+        options.context_pool_tokens + options.context_pool_sessions * tail;
+    const auto row =
+        std::max<std::size_t>(c.AttentionKvDim(), c.indexer_head_dim);
+    if (!row || capacity > (maximum / sizeof(__half) - 1) / row) {
+      AssignError(error_msg, "shared context byte extent overflows");
+      return nullptr;
+    }
+    e->context_arena_ = std::make_unique<core::ContextArena>(capacity);
+    e->shared_attention_.resize(c.num_layers);
+    const auto allocate = [&](SharedRows& rows) {
+      rows.key = Alloc<__half>(a, capacity * c.AttentionKvDim(), error_msg,
+                               &e->shared_context_bytes_);
+      if (!rows.key)
+        return false;
+      rows.value = Alloc<__half>(a, capacity * c.AttentionKvDim(), error_msg,
+                                 &e->shared_context_bytes_);
+      if (!rows.value)
+        return false;
+      rows.pooled = Alloc<__half>(
+          a, (capacity / c.compress_ratio + 1) * c.indexer_head_dim, error_msg,
+          &e->shared_context_bytes_);
+      return rows.key && rows.value && rows.pooled &&
+             Check(
+                 hipMemsetAsync(rows.key, 0,
+                                capacity * c.AttentionKvDim() * sizeof(__half),
+                                e->stream_),
+                 "shared key initialization", error_msg) &&
+             Check(
+                 hipMemsetAsync(rows.value, 0,
+                                capacity * c.AttentionKvDim() * sizeof(__half),
+                                e->stream_),
+                 "shared value initialization", error_msg) &&
+             Check(hipMemsetAsync(rows.pooled, 0,
+                                  (capacity / c.compress_ratio + 1) *
+                                      c.indexer_head_dim * sizeof(__half),
+                                  e->stream_),
+                   "shared pooled-key initialization", error_msg);
+    };
+    for (std::uint32_t layer = 0; layer < c.num_layers; ++layer)
+      if (!c.IsLinearLayer(layer) && !allocate(e->shared_attention_[layer]))
+        return nullptr;
+    if (e->has_mtp() && !allocate(e->shared_mtp_))
+      return nullptr;
+    e->relocation_scratch_ = Alloc<std::uint8_t>(
+        a, kRelocationScratchBytes, error_msg, &e->shared_context_bytes_);
+    if (!e->relocation_scratch_ ||
+        !Check(hipDeviceSynchronize(), "shared context startup allocation",
+               error_msg))
+      return nullptr;
+  }
   return e;
 }
 
@@ -1285,6 +1500,15 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
     return nullptr;
   }
   s->max_context_ = max_context;
+  if (context_arena_) {
+    const std::lock_guard lock(context_mutex_);
+    if (context_sessions_.size() >= options_.context_pool_sessions) {
+      AssignError(error_msg, "shared context session capacity exceeded");
+      return nullptr;
+    }
+    s->shared_id_ = context_arena_->Register();
+    context_sessions_.emplace(s->shared_id_, s.get());
+  }
   // Before sparse attention starts, pooling can lag by indexer_top_k
   // rows. Afterwards only an incomplete block precedes the current batch.
   // Completed block keys remain in block_k; their raw rows are dead.
@@ -1305,20 +1529,23 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       l.state = Alloc<float>(a, state_elems, error_msg, &s->allocated_bytes_);
     } else {
       auto& at = s->attention_[il];
-      at.k_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
-      at.v_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
+      if (!context_arena_) {
+        at.k_cache =
+            Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
+                          error_msg, &s->allocated_bytes_);
+        at.v_cache =
+            Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
+                          error_msg, &s->allocated_bytes_);
+      }
       at.index_k = Alloc<float>(
           a, static_cast<std::size_t>(s->index_capacity_) * c.indexer_head_dim,
           error_msg, &s->allocated_bytes_);
-      at.block_k = Alloc<__half>(
-          a,
-          static_cast<std::size_t>(max_context / c.compress_ratio + 1) *
-              c.indexer_head_dim,
-          error_msg, &s->allocated_bytes_);
+      if (!context_arena_)
+        at.block_k = Alloc<__half>(
+            a,
+            static_cast<std::size_t>(max_context / c.compress_ratio + 1) *
+                c.indexer_head_dim,
+            error_msg, &s->allocated_bytes_);
     }
   }
   if (c.ple_layer >= 0) {
@@ -1331,18 +1558,22 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
     s->mtp_.target_hidden = Alloc<float>(
         a, static_cast<std::size_t>(options_.max_speculative) * c.HcDim(),
         error_msg, &s->allocated_bytes_);
-    s->mtp_.k_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
-    s->mtp_.v_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
+    if (!context_arena_) {
+      s->mtp_.k_cache =
+          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
+                        error_msg, &s->allocated_bytes_);
+      s->mtp_.v_cache =
+          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
+                        error_msg, &s->allocated_bytes_);
+    }
     s->mtp_.index_k =
         Alloc<float>(a, std::size_t{s->index_capacity_} * c.indexer_head_dim,
                      error_msg, &s->allocated_bytes_);
-    s->mtp_.block_k = Alloc<__half>(
-        a, std::size_t{max_context / c.compress_ratio + 1} * c.indexer_head_dim,
-        error_msg, &s->allocated_bytes_);
+    if (!context_arena_)
+      s->mtp_.block_k = Alloc<__half>(
+          a,
+          std::size_t{max_context / c.compress_ratio + 1} * c.indexer_head_dim,
+          error_msg, &s->allocated_bytes_);
     s->mtp_.h = Alloc<float>(a, c.HcDim(), error_msg, &s->allocated_bytes_);
     if (!model_->draft_output().empty()) {
       s->mtp_.draft_rows = Alloc<std::uint8_t>(
@@ -1549,6 +1780,17 @@ std::size_t Executor::DeferredScratchBytes() const {
   }
   // Committed spare blocks for captures, whether or not they exist yet.
   return bytes + SnapshotAllocator::SpareBytes(mutable_bytes);
+}
+
+std::size_t Executor::AppendBytes(core::SessionMode mode,
+                                  std::uint32_t context) const noexcept {
+  const auto& c = config();
+  const auto layers = c.num_layers / c.full_attention_interval +
+                      (mode == core::SessionMode::kSpeculative ? 1 : 0);
+  return layers *
+         (2 * std::size_t{context} * c.AttentionKvDim() * sizeof(__half) +
+          (std::size_t{context} / c.compress_ratio + 1) * c.indexer_head_dim *
+              sizeof(__half));
 }
 
 /// Column-tile width for the routed expert GEMMs: the tile at or above twice
@@ -3011,7 +3253,8 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     AssignError(error_msg, "requested logit rows exceed the batch or limit");
     return false;
   }
-  if (session.owner_ != this || session.position_ + n > session.max_context_) {
+  if (session.owner_ != this ||
+      !session.HasContextCapacity(session.position_ + n)) {
     AssignError(error_msg, "session context is full");
     return false;
   }
@@ -4292,7 +4535,7 @@ bool Executor::MtpForward(Session& session,
     return false;
   }
   const std::uint32_t pos = session.mtp_.position;
-  if (pos + n > session.max_context_) {
+  if (!session.HasContextCapacity(pos + n)) {
     AssignError(error_msg, "MTP context is full");
     return false;
   }

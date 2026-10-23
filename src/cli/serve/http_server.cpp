@@ -1399,6 +1399,10 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
   if (const auto sessions = b.session_states().size(); sessions > 0) {
     resp["total_slots"] = sessions;
   }
+  if (const auto capacity = b.context_pool_tokens()) {
+    resp["context_pool_tokens"] = capacity;
+    resp["context_pool_reserved_tokens"] = b.context_pool_reserved_tokens();
+  }
 
   // What a request without sampling fields gets.
   const auto defaults = b.sampling_defaults();
@@ -1491,6 +1495,17 @@ double KvCacheUsageRatio(const TextGenerationBackend& b) {
 
 HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
   std::ostringstream out;
+  if (const auto capacity = b.context_pool_tokens()) {
+    out << "# HELP gufo_context_pool_capacity_tokens Shared live context "
+           "capacity\n"
+        << "# TYPE gufo_context_pool_capacity_tokens gauge\n"
+        << "gufo_context_pool_capacity_tokens " << capacity << '\n'
+        << "# HELP gufo_context_pool_reserved_tokens Reserved native context, "
+           "including idle frontiers\n"
+        << "# TYPE gufo_context_pool_reserved_tokens gauge\n"
+        << "gufo_context_pool_reserved_tokens "
+        << b.context_pool_reserved_tokens() << '\n';
+  }
   out << std::setprecision(std::numeric_limits<double>::max_digits10);
   out << "# HELP gufo_device_lost_total Confirmed GPU context losses\n"
       << "# TYPE gufo_device_lost_total counter\n"

@@ -582,6 +582,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string model;
     std::string served_model_name;
     std::uint32_t max_context = 0;
+    std::size_t context_pool_tokens = 0;
     std::int64_t max_tokens = -1;
     sampling::SamplingConfig sampling_config;
     std::string reasoning_mode = "auto";
@@ -619,6 +620,10 @@ void PrintServeHelp(std::string_view program_name,
     gufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
+
+    parser.AddOption("", "--context-pool-tokens", "N",
+                     "Shared Flash-Next context capacity (0: fixed allocation)",
+                     "Scheduling", &context_pool_tokens);
 
     // Model & Context
     parser.AddOption("-m", "--model", "PATH",
@@ -1136,6 +1141,7 @@ int RunServe(std::span<const char* const> args) {
     }
   } else {
     // Default to LLM server
+    std::size_t context_pool_tokens = 0;
     std::string model;
     std::string served_model_name;
     std::uint32_t max_context = 0;
@@ -1249,6 +1255,11 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--max-pending", "N",
                          "Maximum queued generation requests (default: 16)",
                          "Scheduling", &max_pending_requests);
+    llm_parser.AddOption(
+        "", "--context-pool-tokens", "N",
+        "Flash-Next shared live context capacity; reserve prompt plus output "
+        "before admission (0: fixed per-session allocation)",
+        "Scheduling", &context_pool_tokens);
     llm_parser.AddOption(
         "", "--max-pending-per-client", "N",
         "Maximum queued requests per client IP (default: --max-pending)",
@@ -1462,7 +1473,7 @@ int RunServe(std::span<const char* const> args) {
         },
         vision_model_path,
         server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
-        enable_yarn);
+        enable_yarn, context_pool_tokens);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";

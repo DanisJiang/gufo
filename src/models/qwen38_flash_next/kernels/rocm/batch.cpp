@@ -193,7 +193,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
         (item.hidden_row >= 0 &&
          static_cast<std::uint32_t>(item.hidden_row) + n >
              options_.max_speculative) ||
-        item.session->mtp_.position + n > item.session->max_context_) {
+        !item.session->HasContextCapacity(item.session->mtp_.position + n)) {
       return Fail(error, "invalid MTP body request");
     }
     for (std::size_t j = 0; j < i; ++j) {
@@ -812,8 +812,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         item.tokens.empty() || item.tokens.size() > kDecodeRows ||
         item.tokens.size() > options_.max_logit_rows ||
         (item.speculative && item.tokens.size() > options_.max_speculative) ||
-        item.session->position_ + item.tokens.size() >
-            item.session->max_context_) {
+        !item.session->HasContextCapacity(item.session->position_ +
+                                          item.tokens.size())) {
       return Fail(error, "invalid session or chain in decode batch");
     }
     for (std::size_t j = 0; j < i; ++j) {

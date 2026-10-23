@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cache/slot.hpp"
 #include "src/core/hip/snapshot_copy.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
@@ -147,6 +148,15 @@ public:
   }
   void BeforeRestore() override {
     BeforeExecution();
+    GuardAll();
+  }
+  bool CanRebase() const noexcept override {
+    return guard.HoldsExecutionLease() && !restoring && !failed && !pending &&
+           !checkpoint;
+  }
+  void BeforeRebase() override {
+    if (!CanRebase())
+      throw cache::SlotBusy();
     GuardAll();
   }
   void BeforeRelease() noexcept override {
@@ -404,6 +414,9 @@ void ContinuationAdapter::BeginRestore(
   };
   const auto target = frontier(ContinuationPart::kTokens);
   const auto draft = frontier(ContinuationPart::kDraftKey);
+  if (!state.session->session_->HasContextCapacity(std::max(target, draft)))
+    throw std::invalid_argument(
+        "restore exceeds assigned shared context range");
   const auto expected =
       layout_.Positions(target, draft, frontier(ContinuationPart::kPooledKeys),
                         frontier(ContinuationPart::kDraftPooledKeys));

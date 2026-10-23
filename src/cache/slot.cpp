@@ -66,7 +66,7 @@ struct LeaseState final : MutationGuard {
   Adapter& adapter;
   Stream& stream;
   std::shared_ptr<SlotState> source;
-  std::mutex mutex;
+  mutable std::mutex mutex;
   std::list<Entry> rows;
   // Foreground mutation can erase registrations. Reset this cursor whenever
   // execution releases the slot; the idle worker never uses it while leased.
@@ -118,6 +118,10 @@ struct LeaseState final : MutationGuard {
   void CheckStop() const {
     if (stop.stop_requested())
       throw std::runtime_error("slot lease cancelled");
+  }
+  bool HoldsExecutionLease() const noexcept override {
+    const std::lock_guard lock(mutex);
+    return leased && !spilling;
   }
   using Clock = std::chrono::steady_clock;
   static std::uint64_t Nanoseconds(Clock::time_point start) {

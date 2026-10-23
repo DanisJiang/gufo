@@ -18,6 +18,8 @@ public:
   virtual void BeforeReset() = 0;
   virtual void AfterReset() = 0;
   virtual void BeforeRestore() = 0;
+  virtual bool CanRebase() const noexcept { return true; }
+  virtual void BeforeRebase() { BeforeReset(); }
   virtual void BeforeRelease() noexcept = 0;
 };
 }  // namespace gufo::models::qwen38_flash_next

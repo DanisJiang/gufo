@@ -567,6 +567,18 @@ public:
   }
   bool Invalidate(Slot& s) noexcept override { return fake.Invalidate(s); }
 };
+void RebaseLeaseVisibility() {
+  ResourceLedger ledger{kLimits};
+  BadAdapter adapter;
+  FakeStream stream;
+  LeasedSlot slot(ledger, adapter, stream, SlotId{21});
+  assert(!adapter.guard->HoldsExecutionLease());
+  {
+    auto lease = slot.Acquire();
+    assert(adapter.guard->HoldsExecutionLease());
+  }
+  assert(!adapter.guard->HoldsExecutionLease());
+}
 void MissedGuard() {
 #ifndef NDEBUG
   const auto child = fork();
@@ -597,6 +609,7 @@ void MissedGuard() {
 }
 }  // namespace
 int main() {
+  RebaseLeaseVisibility();
   {
     Fixture fixture;
     auto rows =

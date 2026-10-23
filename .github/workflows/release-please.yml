@@ -16,6 +16,7 @@ concurrency:
 jobs:
   release:
     name: Create daily release
+    if: github.repository == 'gufo-org/gufo'
     runs-on: ubuntu-latest
     # The release PR waits for the full Devlab functional run (about an hour).
     timeout-minutes: 180
