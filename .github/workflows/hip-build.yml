@@ -1,0 +1,41 @@
+name: Hosted HIP build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-budget-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: CPU and repository checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          determinate: false
+          extra-conf: |
+            extra-substituters = https://gufo.cachix.org
+            extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
+      - name: Enable Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+        with:
+          use-flakehub: false
+          use-gha-cache: true
+      - name: Verify CPU contracts and repository checks
+        run: nix flake check --print-build-logs --cores 4 --max-jobs 1
+
+  package:
+    name: Build gfx1151 package
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      revision: ${{ github.sha }}
+      artifact-name: gufo-cache-budget-${{ github.sha }}

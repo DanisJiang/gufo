@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
+#include "src/core/platform/env.hpp"
 #include "tests/cache/fake_adapter.hpp"
 #include "tests/cli/fake_cache_resources.hpp"
 #include "tests/support/temporary_directory.hpp"
@@ -1946,6 +1948,78 @@ void StagingIsInternal() {
   }
   std::filesystem::remove_all(directory);
 }
+void ExplicitLogicalBudgetAdmitsPublicationMetadata() {
+  static constexpr std::string_view name =
+      "GUFO_CACHE_KEEP_EXPLICIT_RAM_BUDGET";
+  struct RestoreEnvironment {
+    bool present;
+    std::string previous;
+    ~RestoreEnvironment() {
+      if (present)
+        platform::SetEnv(name, previous);
+      else
+        platform::UnsetEnv(name);
+    }
+  } restore{std::getenv(name.data()) != nullptr,
+            std::getenv(name.data()) ? std::getenv(name.data()) : ""};
+  class BudgetRunner final : public Runner {
+  public:
+    mutable cache::ResourceLedger* ledger{};
+    mutable cache::ResourceCharge retained;
+    mutable std::size_t committed{};
+    bool segmented{true};
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      claim.retained_snapshot_capacity_bytes = 3665655808ULL;
+      claim.retained_snapshot_ceiling_bytes = 3036344320ULL;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& resources, std::size_t ram) const override {
+      auto result = Runner::CreateComponentCacheResources(resources, ram);
+      ledger = &resources;
+      if (!segmented)
+        return result;
+      result->commit_backing = [this, &resources](std::size_t budget) {
+        committed = budget;
+        // Reproduce the observed accounting occupancy without allocating a
+        // multi-GiB payload. Physical backing limits are provider-owned.
+        retained =
+            resources
+                .Reserve(cache::ResourceCategory::kBackingFree, 2980000000ULL)
+                .Convert();
+      };
+      return result;
+    }
+  };
+  const TemporaryDirectory temp("gufo-component-logical-budget-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20};
+  for (const bool keep : {false, true}) {
+    assert(platform::SetEnv(name, keep ? "1" : "0"));
+    for (const bool automatic : {false, true}) {
+      auto runner = std::make_shared<BudgetRunner>();
+      TextRunnerPool pool(runner, 3, disk,
+                          {.capacity_bytes = automatic ? 0 : 8ULL << 30});
+      const bool preserved = keep && !automatic;
+      const auto expected = preserved ? 8ULL << 30 : 3035295744ULL;
+      assert(runner->committed == expected);
+      assert(runner->ledger->Limits().ram_bytes == expected);
+      bool accepted = false;
+      try {
+        auto working = runner->ledger->Reserve(
+            cache::ResourceCategory::kMetadata, 255145136);
+        accepted = true;
+      } catch (const cache::ResourceExhausted&) {
+      }
+      assert(accepted == preserved);
+    }
+    auto runner = std::make_shared<BudgetRunner>();
+    runner->segmented = false;
+    TextRunnerPool pool(runner, 3, disk, {.capacity_bytes = 8ULL << 30});
+    assert(runner->ledger->Limits().ram_bytes == 3036344320ULL);
+  }
+}
 void StagingCountsAgainstRamCeiling() {
   class CeilingRunner final : public Runner {
   public:
@@ -3123,6 +3197,7 @@ int main() {
   UnpersistedOverRamCaptureIsRefused();
   OrphansLeaveBeforeCheckpoints();
   StagingIsInternal();
+  ExplicitLogicalBudgetAdmitsPublicationMetadata();
   StagingCountsAgainstRamCeiling();
   PinnedSlotBytesCountOnce();
   UnpinnedRunnersKeepTheirLimit();

@@ -410,9 +410,10 @@ the host allows and logs `event=ram_cache_trimmed` with the requested and the
 granted bytes; the same remedies restore the full budget.
 
 `--cache-ram-bytes 0` selects automatic sizing. Zero does not disable reuse.
-A positive value replaces the automatic budget and may exceed it: it trades the
-free half of host RAM for retention, but always leaves 4 GiB to the OS and other
-processes. For an 8 GiB cap, use `--cache-ram-bytes 8589934592`. The startup
+By default, a positive value replaces the automatic budget and may exceed it:
+it trades the free half of host RAM for retention, but always leaves 4 GiB to
+the OS and other processes. For an 8 GiB cap, use
+`--cache-ram-bytes 8589934592`. The startup
 line reports the selected `capacity_bytes`, the `automatic_bytes` budget and
 the `max_bytes` an explicit value may claim. With a DFlash2 draft, each
 Qwen3.8-27B session also pins about 400 MiB of prompt capture at startup,
@@ -422,6 +423,18 @@ startup ceiling minus `slot_pinned_bytes` when that ceiling binds.
 `automatic_bytes` is half the available RAM measured before the pins. The
 `global_ram_bytes` gauge and the metadata category include the pins, so live
 usage can exceed `capacity_bytes`.
+
+This fork provides an opt-in accounting mode:
+`GUFO_CACHE_KEEP_EXPLICIT_RAM_BUDGET=1`. With an explicit positive RAM budget
+and segmented component-cache backing, it retains the requested logical
+ledger ceiling instead of clipping it to startup headroom. Automatic sizing
+and RAM-cache-off mode are unchanged. Payload segments still use the original
+physical host-memory and device-heap checks; the setting does not allocate
+8 GiB upfront or change model/session memory. The startup cache line reports
+`explicit_logical_budget=on` and the original `startup_max_bytes` separately
+from the retained `capacity_bytes`. This permits disk-index and publication
+metadata to use the requested budget without pretending the payload backing
+has already committed it. It is not a guarantee that every cache capture fits.
 
 Both are sampled after weights and execution states are allocated, then fixed
 for the server run. Flash-Next and Qwen3.8-27B use half the available

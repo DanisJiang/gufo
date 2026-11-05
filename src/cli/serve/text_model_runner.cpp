@@ -4,6 +4,7 @@
 #include <cassert>
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <future>
 #include <iomanip>
 #include <limits>
@@ -284,6 +285,10 @@ struct TextRunnerPool::Impl {
               ? ram_cache_options.capacity_bytes
               : std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
                          automatic);
+      const char* keep = std::getenv("GUFO_CACHE_KEEP_EXPLICIT_RAM_BUDGET");
+      const bool explicit_logical_budget =
+          ram_cache_options.enabled && ram_cache_options.capacity_bytes &&
+          keep && std::string_view(keep) == "1";
       // This is an upper bound. Providers commit backing only after their
       // slots allocate and the cache observes remaining host capacity. Slots
       // allocate under the ceiling; what they pin is charged on top of this.
@@ -296,7 +301,8 @@ struct TextRunnerPool::Impl {
       // the budget it refers to instead of a bare "std::bad_alloc".
       try {
         component_cache = std::make_unique<ComponentTextCache>(
-            validated.runner, state_count, std::min(requested, ceiling),
+            validated.runner, state_count,
+            explicit_logical_budget ? requested : std::min(requested, ceiling),
             disk_cache_options, !ram_cache_options.capacity_bytes,
             std::max(ceiling, ComponentTextCache::kOffMetadataBytes),
             ram_cache_options.enabled);

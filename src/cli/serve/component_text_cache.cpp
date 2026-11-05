@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <numeric>
@@ -293,6 +294,11 @@ struct ComponentTextCache::Impl {
       entries.push_back(std::move(entry));
     }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
+    std::size_t startup_max_bytes{};
+    bool explicit_logical_budget{};
+    const char* keep = std::getenv("GUFO_CACHE_KEEP_EXPLICIT_RAM_BUDGET");
+    const bool keep_explicit =
+        ram_enabled && !automatic_ram && keep && std::string_view(keep) == "1";
     // RAM cache limit for a runner that pins its slots; computed before the
     // branch below so a short host refuses the load before anything commits.
     std::size_t pinned{}, limit{};
@@ -314,11 +320,18 @@ struct ComponentTextCache::Impl {
       const auto staging = ledger.Limits().staging_bytes;
       const auto requested = ram;
       max_bytes = ceiling > staging ? ceiling - staging : 0;
+      startup_max_bytes = max_bytes;
+      if (keep_explicit) {
+        // Retain the requested accounting ceiling without allocating it.
+        // Segmented payload backing keeps its physical host/heap guards.
+        max_bytes = std::max(max_bytes, ledger.Limits().ram_bytes);
+        explicit_logical_budget = true;
+      }
       ram = std::min(ram, max_bytes);
       if (automatic_ram)
         ram = std::min(ram, automatic);
-      // Within the host ceiling and the limit the slots allocated under. Other
-      // charges above the budget are refused here, as without pins.
+      // Within the chosen ceiling and the limit the slots allocated under.
+      // Other charges above the budget are refused here, as without pins.
       limit = std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
       const auto charged = ledger.Snapshot().ram_bytes;
       const auto granted = std::min(ram, limit > pinned ? limit - pinned : 0);
@@ -372,6 +385,14 @@ struct ComponentTextCache::Impl {
     } else {
       // Slots allocated under the host ceiling; return to the budget. This
       // ignores pinned_bytes: a runner that pins must commit backing.
+      if (keep_explicit) {
+        // Providers without guarded segmented backing keep their ordinary
+        // physical ceiling even when the accounting override was requested.
+        const auto claim = this->runner->ResourceClaim();
+        ram = std::min(ram,
+                       claim.retained_snapshot_ceiling_bytes.value_or(
+                           claim.retained_snapshot_capacity_bytes.value_or(0)));
+      }
       const auto staging = ledger.Limits().staging_bytes;
       ledger.ConstrainLimits({ram + staging, ram, staging, ram});
     }
@@ -502,7 +523,10 @@ struct ComponentTextCache::Impl {
                      " disk_capacity_bytes=" + std::to_string(disk_capacity) +
                      " slot_pinned_bytes=" + std::to_string(slot_pinned_bytes) +
                      " ram_cache=" + (ram_enabled ? "on" : "off") +
-                     " disk_backing_bytes=" + std::to_string(disk_backing));
+                     " disk_backing_bytes=" + std::to_string(disk_backing) +
+                     " explicit_logical_budget=" +
+                     (explicit_logical_budget ? "on" : "off") +
+                     " startup_max_bytes=" + std::to_string(startup_max_bytes));
   }
   ~Impl() {
     // Settle immutable-source readers before slots/resources/index unwind.
